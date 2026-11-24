@@ -1,0 +1,15 @@
+# Rust Made Easy — umbrella workspace. Each converter is a module under
+# converters/<source>/; converter #1 is Electron → Rust (crate
+# `electron-to-rust`, binary `e2r`). Converter #2 (Android) will land in
+# converters/android/.
+[workspace]
+members = ["converters/electron/crates/e2r-cli"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/mr-vishwet/rust-made-easy"
+description = "Convert Electron desktop apps to Rust (Tauri 2). Scan an Electron app, get a feasibility report, and generate a working Tauri 2 project — plug and play."
+keywords = ["electron", "tauri", "rust", "migration", "desktop"]

@@ -1,0 +1,25 @@
+# Rust build output
+/target
+**/*.rs.bk
+
+# NOTE: Cargo.lock is intentionally NOT ignored. electron-to-rust ships a binary
+# (e2r), and a binary crate keeps its lockfile so installs and CI build the
+# exact dependency set the maintainers tested.
+
+# Node / frontend artefacts (fixtures and generated projects may carry these)
+node_modules/
+dist/
+out/
+
+# Logs
+*.log
+
+# macOS
+.DS_Store
+
+# Fixture conversion output — tests write generated projects here; they are
+# build artefacts, not sources
+converters/electron/fixtures/**/out/
+
+# Local scratch from manual e2r runs
+/tmp-e2r-*

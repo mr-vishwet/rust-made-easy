@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Minimal App</title>
+  </head>
+  <body>
+    <h1>Minimal App</h1>
+    <p id="version">loading…</p>
+    <button id="open">Open file</button>
+    <pre id="content"></pre>
+    <script>
+      window.api.getVersion().then((v) => {
+        document.getElementById('version').textContent = 'v' + v;
+      });
+      document.getElementById('open').addEventListener('click', async () => {
+        const text = await window.api.readFile('package.json');
+        document.getElementById('content').textContent = text;
+      });
+      window.api.onLog((message) => console.log('log:', message));
+    </script>
+  </body>
+</html>

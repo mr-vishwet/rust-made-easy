@@ -1,0 +1,21 @@
+%% Proposed product architecture — the end-to-end concept diagram.
+%% Source of truth for the hero diagram in README.md and docs/assets/architecture.svg.
+%% Recreated from the architecture diagram in the original planning discussion.
+flowchart TD
+    A["Electron Repository"] --> B["Deep Application Analysis"]
+    B --> C["Frontend & Backend Dependency Mapping"]
+    C --> D["Application Intermediate Representation"]
+    D --> E["Rust Migration Engine"]
+    E --> F["Rust UI Generation"]
+    E --> G["Rust Business Logic Generation"]
+    E --> H["Native System Integration"]
+    F --> I["Compiled Rust Application"]
+    G --> I
+    H --> I
+    I --> J["Benchmark & Compatibility Testing"]
+    J --> K["Before vs After Report"]
+    E -.-> L["Performance Prediction Engine"]
+    L -.-> K
+
+    classDef stage fill:#dbeafe,stroke:#2563eb,stroke-width:1px,rx:8,ry:8
+    class A,B,C,D,E,F,G,H,I,J,K,L stage

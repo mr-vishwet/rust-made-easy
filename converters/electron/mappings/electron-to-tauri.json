@@ -1,0 +1,261 @@
+[
+  {
+    "electron_api": "app",
+    "notes": "App lifecycle maps to Tauri's App and AppHandle; event names differ slightly.",
+    "plugin": null,
+    "status": "auto",
+    "tauri_target": "tauri App / AppHandle"
+  },
+  {
+    "electron_api": "app.getPath",
+    "notes": "Standard paths (home, app data, documents) map to Tauri's path API.",
+    "plugin": "tauri-plugin-opener",
+    "status": "auto",
+    "tauri_target": "tauri path API (tauri-plugin-opener)"
+  },
+  {
+    "electron_api": "app.quit",
+    "notes": "Direct equivalent; exit code handling is the same.",
+    "plugin": null,
+    "status": "auto",
+    "tauri_target": "app.exit() / AppHandle::exit"
+  },
+  {
+    "electron_api": "BrowserWindow",
+    "notes": "Window options (size, title, frame, resizable) map to WebviewWindowBuilder.",
+    "plugin": null,
+    "status": "auto",
+    "tauri_target": "WebviewWindow"
+  },
+  {
+    "electron_api": "ipcMain.handle",
+    "notes": "Each handler becomes a Tauri command registered with invoke_handler.",
+    "plugin": null,
+    "status": "auto",
+    "tauri_target": "#[tauri::command]"
+  },
+  {
+    "electron_api": "ipcMain.on",
+    "notes": "Fire-and-forget main-side listeners map to Tauri events.",
+    "plugin": null,
+    "status": "auto",
+    "tauri_target": "tauri event listener (app.listen)"
+  },
+  {
+    "electron_api": "ipcRenderer.invoke",
+    "notes": "Request/response calls map one-to-one to Tauri invoke().",
+    "plugin": null,
+    "status": "auto",
+    "tauri_target": "invoke() from @tauri-apps/api"
+  },
+  {
+    "electron_api": "ipcRenderer.on",
+    "notes": "Renderer event listeners map to Tauri listen().",
+    "plugin": null,
+    "status": "auto",
+    "tauri_target": "listen() from @tauri-apps/api"
+  },
+  {
+    "electron_api": "ipcRenderer.send",
+    "notes": "Fire-and-forget renderer sends map to Tauri emit().",
+    "plugin": null,
+    "status": "auto",
+    "tauri_target": "emit() from @tauri-apps/api"
+  },
+  {
+    "electron_api": "dialog.showOpenDialog",
+    "notes": "File picker options map closely; multi-select and filters are supported.",
+    "plugin": "tauri-plugin-dialog",
+    "status": "auto",
+    "tauri_target": "tauri-plugin-dialog open()"
+  },
+  {
+    "electron_api": "dialog.showSaveDialog",
+    "notes": "Save dialog maps directly; default path handling differs slightly.",
+    "plugin": "tauri-plugin-dialog",
+    "status": "auto",
+    "tauri_target": "tauri-plugin-dialog save()"
+  },
+  {
+    "electron_api": "dialog.showMessageBox",
+    "notes": "Message boxes map directly; button order follows platform conventions.",
+    "plugin": "tauri-plugin-dialog",
+    "status": "auto",
+    "tauri_target": "tauri-plugin-dialog message()"
+  },
+  {
+    "electron_api": "Menu",
+    "notes": "Static templates convert mechanically; dynamic menus and roles need review.",
+    "plugin": null,
+    "status": "assisted",
+    "tauri_target": "tauri menu API (tauri::menu)"
+  },
+  {
+    "electron_api": "MenuItem",
+    "notes": "Menu items map over, but Electron roles have no one-to-one Tauri equivalent.",
+    "plugin": null,
+    "status": "assisted",
+    "tauri_target": "tauri::menu::MenuItem"
+  },
+  {
+    "electron_api": "Tray",
+    "notes": "Tray icons need the plugin and per-platform icon assets; context menus differ.",
+    "plugin": "tauri-plugin-system-tray",
+    "status": "assisted",
+    "tauri_target": "tauri-plugin-system-tray / tray-icon"
+  },
+  {
+    "electron_api": "shell.openExternal",
+    "notes": "Opening URLs in the default browser is a direct plugin call.",
+    "plugin": "tauri-plugin-opener",
+    "status": "auto",
+    "tauri_target": "tauri-plugin-opener open_url()"
+  },
+  {
+    "electron_api": "shell.openPath",
+    "notes": "Opening files and folders maps directly to the opener plugin.",
+    "plugin": "tauri-plugin-opener",
+    "status": "auto",
+    "tauri_target": "tauri-plugin-opener open_path()"
+  },
+  {
+    "electron_api": "Notification",
+    "notes": "Desktop notifications map directly; action buttons need capability config.",
+    "plugin": "tauri-plugin-notification",
+    "status": "auto",
+    "tauri_target": "tauri-plugin-notification"
+  },
+  {
+    "electron_api": "globalShortcut",
+    "notes": "Global hotkeys map to the plugin; accelerator strings are mostly identical.",
+    "plugin": "tauri-plugin-global-shortcut",
+    "status": "auto",
+    "tauri_target": "tauri-plugin-global-shortcut"
+  },
+  {
+    "electron_api": "protocol",
+    "notes": "Custom schemes are possible in Tauri but the registration API is different.",
+    "plugin": null,
+    "status": "assisted",
+    "tauri_target": "tauri custom protocol / asset protocol"
+  },
+  {
+    "electron_api": "session",
+    "notes": "Electron sessions have no Tauri equivalent; cookie and partition logic needs a redesign.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": "webview partition / cookies (no direct equivalent)"
+  },
+  {
+    "electron_api": "safeStorage",
+    "notes": "OS keychain access works via the keyring crate, but the API shape differs.",
+    "plugin": null,
+    "status": "assisted",
+    "tauri_target": "keyring crate"
+  },
+  {
+    "electron_api": "nativeTheme",
+    "notes": "Dark/light theme detection and switching map to the Tauri window API.",
+    "plugin": null,
+    "status": "auto",
+    "tauri_target": "tauri window theme API"
+  },
+  {
+    "electron_api": "autoUpdater",
+    "notes": "Auto-updates need the plugin plus a signed update feed; the flow is similar.",
+    "plugin": "tauri-plugin-updater",
+    "status": "auto",
+    "tauri_target": "tauri-plugin-updater"
+  },
+  {
+    "electron_api": "webContents.send",
+    "notes": "Main-to-renderer messages map to Tauri window events.",
+    "plugin": null,
+    "status": "auto",
+    "tauri_target": "tauri event emit (window.emit)"
+  },
+  {
+    "electron_api": "webContents.openDevTools",
+    "notes": "DevTools toggling is a direct window method in Tauri.",
+    "plugin": null,
+    "status": "auto",
+    "tauri_target": "window.open_devtools()"
+  },
+  {
+    "electron_api": "clipboard",
+    "notes": "Clipboard read/write maps to the plugin; image clipboard support varies by OS.",
+    "plugin": "tauri-plugin-clipboard-manager",
+    "status": "auto",
+    "tauri_target": "tauri-plugin-clipboard-manager"
+  },
+  {
+    "electron_api": "screen",
+    "notes": "Display enumeration maps to Tauri's monitor API.",
+    "plugin": null,
+    "status": "auto",
+    "tauri_target": "tauri window / monitor API"
+  },
+  {
+    "electron_api": "powerMonitor",
+    "notes": "No direct Tauri equivalent; power events need a platform-specific Rust implementation.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": null
+  },
+  {
+    "electron_api": "crashReporter",
+    "notes": "No built-in Tauri crash reporter; use a service SDK (e.g. Sentry) instead.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": null
+  },
+  {
+    "electron_api": "net",
+    "notes": "Electron's net maps to reqwest in Rust, but the streaming API differs.",
+    "plugin": null,
+    "status": "assisted",
+    "tauri_target": "reqwest"
+  },
+  {
+    "electron_api": "nativeImage",
+    "notes": "Image loading and resizing need the image crate or Tauri's image helpers.",
+    "plugin": null,
+    "status": "assisted",
+    "tauri_target": "tauri image API"
+  },
+  {
+    "electron_api": "contextBridge",
+    "notes": "Exposed preload APIs become a thin shim calling Tauri invoke().",
+    "plugin": null,
+    "status": "auto",
+    "tauri_target": "preload shim over invoke()"
+  },
+  {
+    "electron_api": "electron-store",
+    "notes": "JSON key-value storage maps to the Tauri store plugin; file location differs.",
+    "plugin": "tauri-plugin-store",
+    "status": "auto",
+    "tauri_target": "tauri-plugin-store"
+  },
+  {
+    "electron_api": "node-pty",
+    "notes": "Pseudo-terminals need the portable-pty crate and a hand-written command layer.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": "portable-pty crate"
+  },
+  {
+    "electron_api": "better-sqlite3",
+    "notes": "Synchronous SQLite access becomes rusqlite calls behind Tauri commands.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": "rusqlite"
+  },
+  {
+    "electron_api": "sqlite3",
+    "notes": "Async SQLite access becomes rusqlite calls behind Tauri commands.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": "rusqlite"
+  }
+]

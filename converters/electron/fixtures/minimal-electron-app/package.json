@@ -1,0 +1,15 @@
+{
+  "dependencies": {
+    "electron-store": "^8.0.0"
+  },
+  "description": "Minimal Electron app fixture for electron-to-rust golden tests",
+  "devDependencies": {
+    "electron": "^30.0.0"
+  },
+  "main": "main.js",
+  "name": "minimal-electron-app",
+  "scripts": {
+    "start": "electron ."
+  },
+  "version": "1.0.0"
+}
