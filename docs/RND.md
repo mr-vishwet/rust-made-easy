@@ -366,6 +366,209 @@ honestly by the tool, not papered over.
 > discussion, redrawn as native Mermaid. They are our own assets; no third-party images
 > from that discussion are used.
 
+### Proof campaign: accuracy on five real Electron apps (November 2026)
+
+After the battle-test, the scanner was run against five large, real, purely
+open-source Electron apps — VS Code, Signal Desktop, Joplin, GitHub Desktop,
+and Mailspring — and every finding was hand-checked against the source
+(strict: a finding counts as correct only when the API, file, and line are
+right). The pre-fix results were the baseline that drove the fix round:
+
+| App | Accuracy (strict) | Dominant failure modes |
+| --- | --- | --- |
+| VS Code | 15/20 = 75% | test files (52% of IPC channels), `src/main.ts` pulled in as renderer |
+| Signal | 19/21 = 90.5% | 11/12 windows were test doubles; `vite` reported from a devDep |
+| Joplin | 17/21 = 81.0% | regex-literal comment-stripping bug; root-only `package.json` |
+| GitHub Desktop | 15/21 = 71.4% | 48% of occurrences in test files; 0 windows found; context menu as app menu |
+| Mailspring | 19/33 = 57.6% | same-named locals (`session`, `app-shell`), renderer in `app/src/` |
+| **Combined** | **85/116 = 73.3%** | |
+
+The fix round (same release, unreleased) addressed all twelve failure
+classes generically — scanner-level, not app-specific — so the fixes hold
+whatever the final proof set is:
+
+1. **Test exclusion:** test/spec/fixture/playwright files are excluded from
+   findings, occurrences, IPC channels, windows, and renderer touch points.
+2. **Identifier resolution:** string literals are stripped before matching
+   (IPC channel names excepted — they live in strings by design), and a bare
+   identifier must resolve to an Electron import binding in the file, an
+   inline `require('electron')` / `require('@electron/remote')` access, or
+   an Electron export passed in as a parameter / via DI. A file-local
+   declaration shadows the app-wide fallback — the smoke re-scan caught
+   Mailspring's draft/agent "sessions" and GitHub Desktop's credential
+   sessions counting as Electron's `session` — and an object-literal
+   property key (`{ session: ... }`) is not a use. Remote-mediated
+   calls are forced to MANUAL.
+3. **Window detection:** options passed as a variable are resolved to the
+   variable's object literal; `electron.BrowserWindow` counts; a window
+   with no resolvable size is reported as unknown.
+4. **Monorepo `package.json`:** all `package.json` files are read (bounded
+   depth); the app package (electron dep + main entry) supplies metadata,
+   and native addons are detected from dependencies across all packages
+   (including `@signalapp/sqlcipher`, `sqlite3`, `keytar`, `sqlite-vec`,
+   `fs-admin`, `registry-js`, `node-llama-cpp`, `@getinsomnia/node-libcurl`,
+   `@parcel/watcher`). `vendor/` directories are
+   excluded from package discovery, and score ties go to the shallower
+   package — the smoke re-scan caught both: GitHub Desktop's vendored
+   `printenvz` package outscored the real app package, and Mailspring's
+   `account-sidebar` internal package tied `app/` and won under the old
+   deeper-first tie-break. Fix round 2 added a root-package bonus and a
+   −50 penalty for packages under `extensions/` — VS Code's scan had
+   picked `extensions/copilot/package.json` (copilot-chat 0.77.0) over
+   the root (code-oss-dev 1.149.0) — and the Electron version now falls
+   back to the app package's `nativeBuild.target` before any other
+   package's `electron` dependency, so an extension's Electron version
+   can no longer win.
+5. **Renderer detection:** generic search over monorepo layouts
+   (`packages/*/`, `app/src/ui/`, `app/src/`, `ts/` + `bundles/`/`out/`/`dist/`
+   under package dirs), with the main-process entry excluded from renderer
+   candidates, a whole-word bundler check (a `build/vite` path is not vite),
+   and `rolldown` as its own bundler. Fix round 2 (2026-11-25) hardened
+   the recursive search after the convert run showed it copying the wrong
+   renderer for 3/5 apps — Joplin `packages/pdf-viewer`, Signal
+   `sticker-creator/src`, Insomnia `examples/insomnia-plugin-sandbox-demo`
+   — while the real renderers (`packages/app-desktop/gui/`, `ts/`,
+   `packages/insomnia/src/`) went unpicked. Note the scan and the convert
+   shared the pick: both call `detect_renderer` / `find_source_dir`, so
+   there was no parallel heuristic to unify, only this function to fix
+   (the v2 UI carry-over percentages were computed over the same wrong
+   file sets, which is why they looked high). The guards, all generic:
+   example/demo/sample/sandbox/playground trees are never descended
+   into; a dir inside a *foreign* package — a sibling sub-app or library
+   — is not a candidate, where foreign means the owning package sits
+   outside the app package's dir, or is a standalone sub-app (its
+   `package.json` has no `main` field: Signal's `sticker-creator/`,
+   whose `src/` has no `package.json` of its own). Packages nested
+   INSIDE the app package that have a `main` field are NOT foreign:
+   Mailspring's 53 `internal_packages/*` (each `main: ./lib/main`) are
+   the app's own plugin UI — the first version of the rule wrongly
+   excluded them and narrowed Mailspring's renderer from `app/` to
+   `app/src/`; the refinement (foreign = outside the app package, or
+   no-`main`) plus a second bug fix (see below) restored `app/`.
+   Candidates rank by `.tsx`/`.jsx` density first, then a strict entry
+   (`.tsx`/`.jsx` stem or `index.html` — a barrel `index.ts` is a module
+   entry, not a renderer entry); a dir with no entry file still counts
+   when dense (≥10 `.tsx`/`.jsx`); and container dirs collapse to the
+   deepest dir holding ≥90% of their renderer files
+   (`packages/app-desktop/` → its `gui/`, `packages/` →
+   `packages/insomnia/src/`). Density counts exclude foreign-package and
+   example/demo subtrees, so a sibling's files cannot inflate a parent —
+   and the count has NO depth limit, because a depth limit relative to
+   each dir makes parent/child counts incomparable: Mailspring's `app/`
+   counted 269 files at depth ≤4 while its `internal_packages/` counted
+   260 (a 96.7% ratio that collapsed `app/` away), against true shares
+   of 464 vs 308 (66%). The count cap (2,000) bounds the work instead.
+   The dev-URL gate was tightened the same way: a candidate must score
+   ≥10 (a `loadURL` line or a window-loading file), because the +5
+   main-process path bonus alone admitted VS Code's OAuth loopback port
+   (127.0.0.1:33418, a redirect URI) as its dev URL — VS Code has no
+   dev server, so it now correctly reports none, while Insomnia's real
+   dev server (localhost:3334, score 15) is kept.
+6. **Menu:** all `Menu.buildFromTemplate` sites are collected; the app menu
+   is the one passed to `Menu.setApplicationMenu`, tray/context menus
+   separately.
+7. **`setAsDefaultProtocolClient`:** registration only — the `'open-url'`
+   listener alternative was dropped.
+8. **Missing patterns:** `WebContentsView`, `utilityProcess`,
+   `MessageChannelMain`, `desktopCapturer`, `systemPreferences`, `webFrame`,
+   `webUtils`, `contentTracing`, `ipcMain.handleOnce`, `MenuItem`,
+   `getGlobal` / `getCurrentWindow` / `getCurrentWebContents`, the
+   `@electron/remote` inline-require form, `Menu.setApplicationMenu`,
+   variable-channel `ipcRenderer.invoke` (recorded as `"dynamic"`), aliased
+   `app`, and member-level `app.*` (MANUAL) and `net.*` (`resolveHost` /
+   `isOnline` are ASSISTED — not `reqwest`). The map grew from 48 to 96
+   entries (31 AUTO / 20 ASSISTED / 45 MANUAL).
+9. **Preload:** entry points only — a file named `preload.*`, `*.sandbox.*`,
+   or `*Preload.js`/`*Preload.ts`, or a path referenced from
+   `webPreferences.preload` / `session.setPreloadScripts` and verified to
+   exist. A `*.preload.ts` module merely runs in preload context (Signal
+   names ~600 renderer modules that way); it is listed separately as a
+   preload-context module, never counted as a preload file. Referenced
+   paths resolve against the app tree (`path.join(__dirname, …)` segment
+   by segment, `.min.js` → `.ts` source fallback, root-relative
+   `FileAccess.asFileUri` paths against the app root) and nonexistent
+   ones are dropped, not reported — the old code reported VS Code
+   phantom preloads and Mailspring's `print/lib/print-preload.js`.
+10. **Comment stripping:** regex literals containing quotes no longer leave
+    a phantom open quote that hides `//` comments. JSX closing tags
+    (`</div>`) are not treated as regex starts, and an unterminated
+    "regex" no longer duplicates the newline it stops at — both corrupted
+    line numbers in `.tsx` files (the smoke re-scan reported Mailspring's
+    windows +2/+3/+6 lines late).
+11. **Import gate:** files that never import Electron but use its APIs via
+    DI or parameters are no longer silently dropped.
+12. **Simulate payload:** e2r's own outputs (`predictions.json`, scan /
+    simulate outputs, `.e2r/`, proof notes) are excluded from the measured
+    app payload, so re-running `simulate` no longer inflates it.
+13. **Test exclusion, second pass:** `test-node/`, `*_test.main.ts`, and
+    `.vscode/` are excluded too (Signal's test windows lived there), and
+    fixture windows in `simulation/` scenes are not app windows.
+14. **`ipcMain` wrappers:** one-line wrappers (`ipcMainHandle` /
+    `ipcMainOn` / `ipcMainOnce` — arrow assignments and function
+    declarations whose first parameter is the channel) are matched as
+    handler registrations, with the `ipcMain.*` call inside the
+    definition skipped; the `<webview>` tag and the `webviewTag`
+    webPreference are MANUAL findings (no Tauri equivalent), found even
+    in renderer files that never import Electron; `electron-updater`'s
+    `autoUpdater` is reported as `electron-updater`, never as Electron's
+    `autoUpdater`; window `width`/`height`/`minWidth`/`minHeight` given
+    as `const NAME = <number>` in the same file resolve to the number.
+15. **Remote mediation is a flag, not just a class:** a finding forced to
+    MANUAL because the call goes through `@electron/remote` (or a
+    remote-derived `webContents` / `Menu` / window) carries
+    `remote_mediated: true`, so the accuracy matrix can split "no Tauri
+    equivalent" from "reached through remote". Typed parameters are
+    honoured the same way: a `session: Session` parameter (or an
+    `Electron.Session`-typed alias such as `directSession`) makes
+    `session.setProxy` and friends real `session` findings.
+16. **Dependencies are data, not findings:** `package.json` dependency
+    declarations (port-needing JS deps, build tooling) no longer appear
+    as findings at `package.json:1`; they still show in the report under
+    `port_needing_deps` / `build_tooling` and in `scan.json`.
+17. **Dev URL ranking and workspace dev scripts:** dev-server URL
+    candidates are ranked (a `loadURL` in main-process code wins over a
+    service URL in an extension or a CLI docs server; a candidate must
+    score above 0 or no dev URL is reported), and the dev script is
+    searched in workspace packages too (`dev` → `start:dev-server` →
+    `dev:server` → `start` → `serve`, command must name a dev server) —
+    Insomnia's `packages/insomnia` `start:dev-server` (`vite dev`,
+    port 3334) is found, while Joplin's and Mailspring's Electron-only
+    `start` scripts still correctly report no dev server.
+
+### Feasibility score (v3 formula)
+
+The v2 formula saturated: every proof app hit both the MANUAL (−40) and
+ASSISTED (−15) caps, so the score degenerated to `45 − 15 × natives` and
+Joplin scored 0 — a formula artifact, not a measurement. The v3 formula
+keeps the same shape (a 0–100 score, lower is harder) but charges scale
+with the actual counts and shares, so apps with different native counts
+and manual shares no longer collide:
+
+```text
+score = 100
+  − min(10 × native_modules, 30)                  // native addons, capped
+  − min(2 × MANUAL_groups, 30)                    // manual APIs, capped
+  − min(1 × max(ASSISTED_groups − 5, 0), 15)      // assisted beyond the first 5
+  − round(20 × MANUAL_occurrences / total_occurrences)  // manual share of all call sites
+  − (10 if the app uses ipcRenderer with no preload file, else 0)
+clamped to [0, 100]
+```
+
+Group counts are the primary signal (the report lists AUTO / ASSISTED /
+MANUAL groups and occurrences); the score is a summary, and the
+manual-share term is what separates apps whose capped group counts
+coincide. On the v2 proof numbers the formula gives VS Code 29, Signal
+42, Joplin 23, Mailspring 24, Insomnia 62 — five different scores, none
+of them 0 by construction.
+
+Known limits that remain (documented in the README too): native-module
+detection is list-based from `package.json` — a `binding.gyp` / prebuild
+check needs installed packages, which a source clone doesn't have — and the
+identifier-resolution gate is a regex/file-level approximation, so a
+same-named local in a file that also references a real Electron export can
+still false-positive, and an Electron export passed through an unusual
+indirection can still be missed.
+
 ---
 
 ## 7. The 3-stage migration ladder
@@ -716,3 +919,44 @@ JSONL, and a missing or corrupt log behaves exactly like no calibration. The
 calibration data the model most needs: real migrated apps' bundle sizes (to
 narrow the ±6 MB anomaly absorption), per-plugin costs, and any Linux memory
 measurement at all.
+
+#### 11.7.1 Like-with-like: the binary is not the bundle (2026-11-25 correction)
+
+The `bundle_size` prediction is the release binary **plus the app payload**;
+`measurements.json` `bundle_size_mb` is the release binary **alone**. Comparing
+them directly is a units mismatch. The proof campaign did exactly that for all
+five apps and `e2r calibrate` reported 0/5 inside — which looked like a model
+failure and would have widened future bundle intervals 1.5× on a false lesson.
+The real story, once like is compared with like:
+
+| App | Measured binary | + predicted payload | Bundle interval | Inside? |
+| --- | --- | --- | --- | --- |
+| VS Code | 26.41 MB | 391.85 MB | 379.94–400.34 MB | yes |
+| Joplin | 23.58 MB | 286.47 MB | 277.39–297.79 MB | yes |
+| Signal | 27.26 MB | 183.75 MB | 170.99–191.39 MB | yes |
+| Mailspring | 22.42 MB | 91.98 MB | 83.56–101.96 MB | yes |
+| Insomnia | 23.82 MB | 51.45 MB | 41.63–60.03 MB | yes |
+
+(Binary + predicted payload is the bundle the model would have produced for
+that binary; the interval is the model's own `bundle_size` after-range.)
+
+The fix, option (a): the simulator now also emits an explicit `binary_size`
+prediction (zero-plugin binary 11.0–17.4 MB + ~2 MB per plugin, no payload),
+and `calibrate` compares the measured binary against the **binary** interval
+only. `bundle_size` compares only against a measured shipped bundle
+(`measurements.json` `shipped_bundle_size_mb`); when no shipped bundle was
+measured — the usual case, since the generated projects ship a placeholder
+`dist/` — `bundle_size` is reported as unmeasured, never silently scored as a
+miss. A binary-alone measurement against a bundle interval is refused by
+construction: there is no code path that compares them.
+
+The five wrong log entries (all `metric: bundle_size`, `inside: false`,
+recorded 2026-11-25T11:22–12:48Z) were **removed** from
+`~/.cache/e2r/calibration.jsonl` with this correction — they encoded the
+wrong lesson and would have widened future intervals. The removed lines are
+preserved for audit at `proof/calibration-correction/` (see
+`CORRECTION.md` there). No correcting entries were added in their place:
+there is no shipped-bundle measurement for any app yet, so there is nothing
+true to log for `bundle_size`; the binary comparisons will be logged the
+next time `calibrate` runs against a record that carries a `binary_size`
+prediction.

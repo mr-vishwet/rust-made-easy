@@ -372,7 +372,7 @@ pub fn get_migration_plan(app_dir: &Path) -> std::result::Result<serde_json::Val
 ///
 /// Single lookup returns the mapping row verbatim:
 /// `{"electron_api", "tauri_target", "plugin", "status", "notes"}`.
-/// The full dump returns `{"count": 48, "mappings": [...]}`.
+/// The full dump returns `{"count": 96, "mappings": [...]}`.
 ///
 /// Errors: `INVALID_ARGUMENT` when `api` is empty (and `list_all` is
 /// false), `API_NOT_FOUND` when the table has no row for the API — never
@@ -1047,8 +1047,11 @@ mod tests {
     #[test]
     fn test_replacement_list_all() {
         let value = get_rust_replacement("", true).expect("list_all must succeed");
-        assert_eq!(value["count"], 48);
-        assert_eq!(value["mappings"].as_array().unwrap().len(), 48);
+        // 96 mappings entries (48 before the proof-campaign fix round
+        // added member-level app.* / net.* and the missing APIs, plus
+        // the `webview` tag entry from fix round 2).
+        assert_eq!(value["count"], 96);
+        assert_eq!(value["mappings"].as_array().unwrap().len(), 96);
     }
 
     #[test]

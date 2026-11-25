@@ -51,6 +51,15 @@ pub struct Finding {
     pub tauri_target: Option<String>,
     /// One honest line about what the conversion involves.
     pub note: String,
+    /// `true` when this call site is reached through
+    /// `@electron/remote` (N8): the underlying API may have a direct
+    /// Tauri equivalent, but the call still has to become an explicit
+    /// `invoke()` + Rust command, so the finding is MANUAL. The flag
+    /// lets the accuracy matrix split "no Tauri equivalent" from
+    /// "reached through @electron/remote" instead of conflating them
+    /// in the MANUAL share.
+    #[serde(default)]
+    pub remote_mediated: bool,
     /// How many occurrences of this API were found in this file.
     /// Findings still display once per (API, file), but the count is
     /// recorded so the report does not understate call sites.
@@ -109,10 +118,20 @@ pub struct PreloadShape {
 /// What the scanner learned about the app's preload scripts.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PreloadInfo {
-    /// Preload script paths (files named `preload.*`, plus any path
-    /// referenced from a `BrowserWindow` `webPreferences.preload`,
-    /// resolved against the referencing file's directory and deduped).
+    /// Preload script *entry points*: files referenced from a
+    /// `BrowserWindow` `webPreferences.preload` (resolved against the
+    /// filesystem — a path that does not exist is dropped, not
+    /// listed), or files named as entry points (`preload.*`,
+    /// `*.sandbox.*`, `*Preload.js`). A file that merely runs in
+    /// preload context is NOT an entry point — see `modules`.
     pub files: Vec<String>,
+    /// Files that run in preload context but are not entry points:
+    /// `*.preload.ts` renderer modules bundled *into* the preload
+    /// script by the app's bundler (Signal names ~600 of them; the v2
+    /// scan listed all 603 as preload files). Reported separately so
+    /// the entry-point list stays usable.
+    #[serde(default)]
+    pub modules: Vec<String>,
     /// Whether any file calls `contextBridge.exposeInMainWorld`.
     pub uses_context_bridge: bool,
     /// Keys exposed to the renderer via `contextBridge.exposeInMainWorld`.
@@ -182,6 +201,12 @@ pub struct MenuInfo {
     pub file: String,
     /// 1-based line number of the `Menu.buildFromTemplate` call.
     pub line: usize,
+    /// `true` when this is the application menu: its template is passed
+    /// to `Menu.setApplicationMenu`, or it is the best-ranked menu site
+    /// in the app (see the scan's menu ranking). Tray / context /
+    /// spell-check menus have this set to `false`.
+    #[serde(default)]
+    pub is_application_menu: bool,
 }
 
 /// A dev-server URL the main process loads (e.g. from `loadURL`), found
@@ -240,6 +265,13 @@ pub struct ScanReport {
     /// plugin equivalent exists.
     #[serde(default)]
     pub port_needing_deps: Vec<String>,
+    /// Build/packaging tooling from `package.json`
+    /// (`electron-builder`, `electron-packager`). Tauri replaces these
+    /// with `cargo tauri build`, so there is nothing to port — only
+    /// the build setup to redo. Reported as data, not as findings:
+    /// a dependency declaration is not a call site (N9).
+    #[serde(default)]
+    pub build_tooling: Vec<String>,
     /// Dev-server URL from the main process, when the main process loads
     /// one (see [`DevUrlInfo`]).
     #[serde(default)]
@@ -252,6 +284,11 @@ pub struct ScanReport {
     pub windows: Vec<WindowInfo>,
     /// Menu info from the first `Menu.buildFromTemplate` call, if any.
     pub menu: Option<MenuInfo>,
+    /// Every `Menu.buildFromTemplate` site found, in (file, line) order.
+    /// `menu` (above) is the application menu picked from these; the
+    /// rest are tray / context / spell-check menus.
+    #[serde(default)]
+    pub menus: Vec<MenuInfo>,
 }
 
 // ---------------------------------------------------------------------------
@@ -318,8 +355,8 @@ impl Range {
 /// predict rather than invent a number.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Prediction {
-    /// Metric id: `"bundle_size"`, `"memory"`, `"startup_time"`,
-    /// `"process_count"`, or `"cpu"`.
+    /// Metric id: `"bundle_size"`, `"binary_size"`, `"memory"`,
+    /// `"startup_time"`, `"process_count"`, or `"cpu"`.
     pub metric: String,
     /// The current (Electron) value, when known or model-estimated.
     pub before: Option<Range>,
@@ -454,7 +491,7 @@ pub struct SimulationReport {
     /// UI preservation estimate.
     pub ui_preservation: UiPreservation,
     /// Performance predictions, in fixed metric order
-    /// (bundle size, memory, startup time, process count, CPU).
+    /// (bundle size, binary size, memory, startup time, process count, CPU).
     pub predictions: Vec<Prediction>,
     /// Warnings, sorted and deduplicated.
     pub warnings: Vec<String>,
@@ -586,9 +623,25 @@ pub struct MeasurementsApp {
 /// ratio prediction and is reported as such.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MeasurementsMetrics {
-    /// Measured Tauri release binary size in MB (decimal MB).
+    /// Measured Tauri release binary size in MB (decimal MB) — the
+    /// binary ALONE, without the app payload. This compares against the
+    /// `binary_size` prediction, never against `bundle_size`: the bundle
+    /// prediction is binary + payload, so scoring a binary-alone number
+    /// against it is a units mismatch (the 2026-11-25 calibration
+    /// correction — RND.md §11). The field keeps its `bundle_size_mb`
+    /// name for backward compatibility with measurements files already
+    /// written; its meaning is the binary, as documented here.
     #[serde(default)]
     pub bundle_size_mb: Option<f64>,
+    /// Measured shipped bundle size in MB (decimal MB) — the release
+    /// binary PLUS the app payload as shipped/installed. This is the
+    /// only number that compares against the `bundle_size` prediction.
+    /// Absent when no shipped bundle was measured (the usual case: the
+    /// generated projects ship a placeholder `dist/`, so no bundle
+    /// exists to measure); then `bundle_size` is reported as
+    /// unmeasured, never scored as a miss.
+    #[serde(default)]
+    pub shipped_bundle_size_mb: Option<f64>,
     /// Measured Electron-app idle memory in MB (the before baseline).
     #[serde(default)]
     pub memory_before_mb: Option<f64>,
@@ -624,6 +677,7 @@ pub struct MeasurementsMetrics {
 ///   "platform": "linux",
 ///   "metrics": {
 ///     "bundle_size_mb": 14.2,
+///     "shipped_bundle_size_mb": 41.8,
 ///     "memory_before_mb": 210.0,
 ///     "memory_after_mb": 130.0,
 ///     "startup_before_ms": 420.0,
@@ -632,6 +686,10 @@ pub struct MeasurementsMetrics {
 ///   }
 /// }
 /// ```
+///
+/// `bundle_size_mb` is the release binary alone; `shipped_bundle_size_mb`
+/// is binary + payload as shipped (absent when no shipped bundle was
+/// measured — then `bundle_size` is uncompared, not a miss).
 ///
 /// `platform` is `"macos"`, `"windows"`, or `"linux"` — the platform
 /// the measurements were taken on. Memory and process-count

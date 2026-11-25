@@ -451,7 +451,10 @@ fn test_handlers_return_structured_json_for_every_tool() {
     // is empty; the synthetic app below proves the MANUAL call-out.
 
     let all = mcp::get_rust_replacement("", true).expect("list_all");
-    assert_eq!(all["count"], 48);
+    // 96 mappings entries (48 before the proof-campaign fix round added
+    // member-level app.* / net.* and the missing APIs; fix round 2 added
+    // the `webview` entry).
+    assert_eq!(all["count"], 96);
 
     let simulation = mcp::simulate_migration(&app_dir, Some("windows")).expect("simulate");
     assert!(simulation["predictions"]

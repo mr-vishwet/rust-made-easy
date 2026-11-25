@@ -391,6 +391,7 @@ mod tests {
                 classification: Classification::Auto,
                 tauri_target: Some("tauri-plugin-dialog".to_string()),
                 note: "Maps to the dialog plugin.".to_string(),
+                remote_mediated: false,
                 occurrences: 1,
             },
             Finding {
@@ -401,6 +402,7 @@ mod tests {
                 classification: Classification::Manual,
                 tauri_target: None,
                 note: String::new(),
+                remote_mediated: false,
                 occurrences: 2,
             },
         ];

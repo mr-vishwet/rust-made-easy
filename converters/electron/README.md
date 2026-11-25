@@ -44,7 +44,42 @@ e2r convert ./my-electron-app --out ./my-app-tauri
 
 **What `scan` gives you:** a report of every Electron API your app uses, every IPC channel, a feasibility score, and each API classified as AUTO (converts mechanically), ASSISTED (converts with a human decision), or MANUAL (needs a rewrite or a recipe).
 
-**What `simulate` gives you:** the migratable breakdown, a UI preservation estimate, predicted gains with confidence ranges (bundle size, memory, startup time, process count — CPU is refused, not guessed), warnings, and an effort hint. Predictions are ranges with confidence levels, never single numbers, and every number carries its basis. See [Commands](#commands).
+**What `scan` counts — and what it deliberately doesn't:**
+
+- **Test files are excluded entirely** (`test/`, `tests/`, `test-node/`, `spec/`, `specs/`, `__tests__/`, `fixtures/`, `playwright/`, `.vscode/`, `*.test.*`, `*.spec.*`, `*_test.*`, `test-*.*`). A Testing Library helper that happens to call something named `screen` is not your app using Electron's `screen`. This was the single biggest source of noise in the proof campaign (48% of GitHub Desktop's occurrences, 52% of VS Code's IPC channels). Fixture windows in `simulation/` scenes are not app windows either.
+- **String literals and same-named locals don't count.** `'app.asar'`, `'./protocol.js'`, `this.session`, `window.reduxActions.app`, `navigator.clipboard`, and a git-remote `state.remote` are not Electron calls. A bare identifier only counts when it resolves to an Electron import binding in that file (destructured, aliased, or `require()` forms) — or when it was passed in from another file as a parameter / dependency-injected value. A file-local declaration of the same name shadows the app-wide fallback: a `session: DraftEditingSession` parameter, a `const session = ...`, or an import from a non-Electron module is the app's own session concept, not Electron's `session` (untyped parameters keep the DI benefit, and an `Electron.*`-typed parameter is not a shadow). An object-literal property key (`{ session: ... }`) is not a use. Inline `require('electron').X` and `require('@electron/remote').X` count, and remote-mediated calls are forced to MANUAL.
+- **Windows are found by variable, not just inline literals.** `new BrowserWindow(winOpts)` resolves `winOpts` to its object literal in the same file; `electron.BrowserWindow` counts too. A window with no resolvable size is reported as unknown, not a confident 800×600. Sizes given as `const NAME = <number>` in the same file resolve to the number, and `electron-window-state` defaults are honoured.
+- **Monorepos are read as monorepos.** Every `package.json` is read (bounded depth, `vendor/` excluded); the Electron app package — the one with the `electron` dependency and a `main` entry — supplies the name, version, Electron version, and main entry (ties go to the shallower package, so an internal package can't outrank `app/`; the root package gets a bonus and packages under `extensions/` a penalty, so an extension can't outrank the app itself). The Electron version falls back to the app package's `nativeBuild.target` before any other package's `electron` dependency. Native addons are detected from dependencies across all packages and listed in full in the report.
+- **Menus are collected, not first-matched.** Every `Menu.buildFromTemplate` site is reported; the app menu is the one passed to `Menu.setApplicationMenu` (or best-ranked by filename), and tray/context menus are listed separately.
+- **`app.setAsDefaultProtocolClient` means registration only.** An `'open-url'` listener or a local wrapper definition is not a registration.
+- **Preloads are entry points, verified to exist.** Only files a window actually loads count as preload files: `preload.*` / `*.sandbox.*` / `*Preload.*` filenames, `webPreferences.preload` (literal, variable, or `path.join(__dirname, …)`), and `session.setPreloadScripts` — each resolved against the app tree (`.min.js` bundles resolve to their `.ts` source; root-relative paths resolve against the app root) and dropped when the file doesn't exist. `*.preload.ts` modules that merely run in preload context are listed separately, never counted as preload files.
+- **IPC wrappers count; the definitions don't.** One-line `ipcMain` wrappers (`ipcMainHandle` / `ipcMainOn` / `ipcMainOnce`) are matched as handler registrations, while the `ipcMain.*` call inside a wrapper definition is not a registration. The `<webview>` tag and the `webviewTag` webPreference are MANUAL findings (no Tauri equivalent). `electron-updater`'s `autoUpdater` is reported as `electron-updater` — a different library from Electron's own `autoUpdater`.
+- **Remote mediation is flagged.** A finding forced to MANUAL because the call goes through `@electron/remote` (or a remote-derived `webContents`, `Menu`, or window) carries `remote_mediated: true` in `scan.json` and shows `[remote-mediated]` in the text report, so "no Tauri equivalent" can be separated from "reached through remote".
+- **Dependencies are data, not findings.** `package.json` dependency declarations (port-needing JS deps, build tooling) never appear as findings; they show in the report under "Port-needing JS dependencies" / "Build tooling" and in `scan.json` as `port_needing_deps` / `build_tooling`.
+- **The dev URL is ranked, not first-matched.** Dev-server URL candidates are ranked — a `loadURL` in main-process code wins over a service URL in an extension or a CLI docs server — and a candidate must score above 0, or no dev URL is reported at all. The dev script itself is searched in workspace packages too (`dev` → `start:dev-server` → `dev:server` → `start` → `serve`).
+- **The renderer search is generic, not root-only.** `packages/*/`, `app/src/ui/`, `app/src/`, `ts/` and build output under package dirs (`dist/`, `build/`, `out/`, `bundles/`) are all candidates; the main-process entry is excluded from renderer candidates (a `main.ts` next to a `main.js` entry is the main process, not a renderer). The bundler is only reported as `vite` when a real vite dependency, config, or script token exists — a `build/vite` path in an install script is not vite — and `rolldown` is detected as its own bundler. Example/demo/sample trees are never renderer candidates, nor are dirs inside a *foreign* package (a sibling sub-app or library, not the app package); candidates rank by `.tsx`/`.jsx` density first, then a strict entry file, and container dirs collapse to the deepest dir holding ≥90% of their renderer files — so a sibling PDF-viewer package, a sticker-creator mini-app, or an examples plugin demo can no longer outrank the real renderer. `scan` and `convert` share this one code path (`detect_renderer`).
+- **Known limits (documented, not hidden):** native-module detection is list-based from `package.json` (a `binding.gyp` / prebuild check needs installed packages, which a source clone doesn't have); the identifier-resolution gate is a regex/file-level approximation — a same-named local in a file that also references a real Electron export can false-positive, and an Electron export passed through an unusual indirection can still be missed.
+
+**The feasibility score** (0–100, lower is harder) charges scale with the
+actual counts and shares, so apps with different native counts and manual
+shares get different scores:
+
+```text
+score = 100
+  − min(10 × native_modules, 30)
+  − min(2 × MANUAL_groups, 30)
+  − min(1 × max(ASSISTED_groups − 5, 0), 15)
+  − round(20 × MANUAL_occurrences / total_occurrences)
+  − (10 if the app uses ipcRenderer with no preload file, else 0)
+clamped to [0, 100]
+```
+
+Group counts are the primary signal (the report lists AUTO / ASSISTED /
+MANUAL groups and occurrences); the score is a summary. The earlier
+formula saturated — every proof app hit both the MANUAL and ASSISTED caps
+— so it was replaced; see [RND.md](../docs/RND.md#feasibility-score-v3-formula).
+
+**What `simulate` gives you:** the migratable breakdown, a UI preservation estimate, predicted gains with confidence ranges (bundle size, memory, startup time, process count — CPU is refused, not guessed), warnings, and an effort hint. Predictions are ranges with confidence levels, never single numbers, and every number carries its basis. The app payload it measures excludes e2r's own outputs (`predictions.json`, `scan`/`simulate` outputs, `.e2r/`, proof notes), so re-running `simulate` in the same directory does not inflate the payload. See [Commands](#commands).
 
 **What `convert` gives you:**
 
@@ -79,7 +114,7 @@ npm install
 npm run tauri dev
 ```
 
-> **Honest v0.1 note:** the renderer is carried over when e2r can find it (see above), and the dev server port is detected from your Vite config, dev script, or bundler default — but exotic setups (electron-vite, Next.js without static export, custom build output dirs) still need manual adaptation, and `MIGRATION-NOTES.md` spells out exactly what. The generated Rust commands are compiling stubs: each one marks the `ipcMain.handle` channel it came from with a `TODO(e2r)` for you (or your coding agent) to port.
+> **Honest v0.1 note:** the renderer is carried over when e2r can find it (see above), and the dev server port is detected from your Vite config, dev script (root or workspace package), or bundler default — but exotic setups (electron-vite, Next.js without static export, custom build output dirs) still need manual adaptation, and `MIGRATION-NOTES.md` spells out exactly what. The generated Rust commands are compiling stubs: each one marks the `ipcMain.handle` channel it came from with a `TODO(e2r)` for you (or your coding agent) to port.
 
 ## Commands
 
@@ -139,7 +174,8 @@ adjusts confidence, not the central estimate. Full design:
   "measured_at": "2026-11-25T04:00:00Z",
   "platform": "linux",              // "macos" | "windows" | "linux"
   "metrics": {
-    "bundle_size_mb": 14.2,         // measured Tauri release binary, MB
+    "bundle_size_mb": 14.2,         // measured Tauri release binary ALONE, MB
+    "shipped_bundle_size_mb": 41.8, // shipped bundle (binary + payload), MB
     "memory_before_mb": 210.0,      // Electron idle memory, MB
     "memory_after_mb": 130.0,       // Tauri idle memory, MB
     "startup_before_ms": 420.0,     // Electron startup, ms
@@ -154,6 +190,18 @@ measurement (the ratio is after / before); a lone after-value is reported as not
 comparable. A measurements file whose platform does not match the predictions
 record's platform produces a warning — memory and process-count predictions are
 per-platform.
+
+**Like-with-like (2026-11-25 correction):** `bundle_size_mb` is the release
+binary alone, and it compares against the `binary_size` prediction — never
+against `bundle_size`, which is binary + payload. `bundle_size` compares only
+against `shipped_bundle_size_mb`, a measured shipped bundle; without one it is
+reported as unmeasured, never scored as a miss. The campaign learned this the
+hard way: five `bundle_size` log entries compared 22–27 MB binaries against
+42–400 MB bundle intervals and reported 0/5 inside — a units mismatch, not a
+model failure (binary + predicted payload lands inside the bundle interval for
+all five, and each binary lands inside its binary interval). Those five entries
+were removed from the calibration log with a documented correction; see
+[docs/RND.md](../../docs/RND.md#1171-like-with-like-the-binary-is-not-the-bundle-2026-11-25-correction).
 
 ## What converts
 

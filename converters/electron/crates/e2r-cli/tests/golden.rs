@@ -358,14 +358,18 @@ fn test_scan_full_apis_fixture() {
 
     assert_eq!(report.app_name, "full-apis-electron-app");
 
-    // The three plugin APIs the fixture exists to exercise.
+    // The three plugin APIs the fixture exists to exercise. The
+    // updater here is `electron-updater` (the library), not Electron's
+    // built-in `autoUpdater`: the fixture binds the `autoUpdater` local
+    // from `require('electron-updater')`, so the finding must say
+    // `electron-updater` and there must be no bare `autoUpdater` one.
     let apis: Vec<String> = report
         .findings
         .iter()
         .map(|f| f.api.to_lowercase())
         .collect();
     for expected in [
-        "autoupdater",
+        "electron-updater",
         "shell.openexternal",
         "notification",
         "nativetheme",
@@ -377,6 +381,10 @@ fn test_scan_full_apis_fixture() {
             "no finding mentions {expected:?}; findings: {apis:?}"
         );
     }
+    assert!(
+        !apis.iter().any(|a| a == "autoupdater"),
+        "aliased electron-updater must not be reported as Electron's autoUpdater; findings: {apis:?}"
+    );
 
     // electron-updater / electron-store are pure JS, so the scanner lists
     // them as port-needing dependencies — NOT as native modules (a dep
@@ -692,6 +700,7 @@ fn test_simulate_all_fixtures_structure() {
     assert_eq!(TargetPlatform::host(), TargetPlatform::Linux);
     let expected_metrics = [
         "bundle_size",
+        "binary_size",
         "memory_linux",
         "startup_time",
         "process_count_linux",
@@ -728,7 +737,7 @@ fn test_simulate_all_fixtures_structure() {
         );
         assert_eq!(report.ui_preservation.factors.len(), 4);
 
-        // Predictions: all five, in fixed order, every range ordered.
+        // Predictions: all six, in fixed order, every range ordered.
         let metrics: Vec<&str> = report
             .predictions
             .iter()

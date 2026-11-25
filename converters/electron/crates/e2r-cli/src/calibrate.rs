@@ -27,6 +27,17 @@
 //! after / before. A lone after-value cannot be compared against a
 //! ratio prediction and is reported as such, not forced. CPU has no
 //! prediction at all (unknown), so it is never compared.
+//!
+//! Like-with-like (the 2026-11-25 correction): the `bundle_size`
+//! prediction is the release binary PLUS the app payload, while
+//! `measurements.json` `bundle_size_mb` is the release binary ALONE —
+//! the two must never be compared directly (five log entries did
+//! exactly that and reported 0/5 inside, which was a units mismatch,
+//! not a model failure; RND.md §11). The binary measurement compares
+//! against the `binary_size` prediction; `bundle_size` compares only
+//! against `shipped_bundle_size_mb` (a shipped bundle, binary +
+//! payload), and when no shipped bundle was measured it is reported
+//! as unmeasured — never silently scored as a miss.
 
 use crate::model::{CalibrationEntry, Measurements, PredictionsRecord, Range};
 use crate::simulate::rfc3339_now;
@@ -153,10 +164,16 @@ fn metric_platform(metric: &str) -> Option<&str> {
 ///
 /// Memory and startup predictions are ratios, so they need a before
 /// AND an after measurement; a lone after-value is not comparable.
+/// Size predictions are like-with-like: `binary_size` compares against
+/// the measured release binary (`bundle_size_mb`), while `bundle_size`
+/// compares only against a measured shipped bundle
+/// (`shipped_bundle_size_mb`) — a binary-alone number is never scored
+/// against the bundle interval.
 fn actual_for_metric(metric: &str, measurements: &Measurements) -> Result<Option<f64>, String> {
     let m = &measurements.metrics;
     match metric {
-        "bundle_size" => Ok(m.bundle_size_mb),
+        "binary_size" => Ok(m.bundle_size_mb),
+        "bundle_size" => Ok(m.shipped_bundle_size_mb),
         "process_count_macos" | "process_count_windows" | "process_count_linux" => {
             Ok(m.process_count)
         }
@@ -741,7 +758,11 @@ mod tests {
             measured_at: "2026-11-25T05:00:00Z".to_string(),
             platform: "linux".to_string(),
             metrics: MeasurementsMetrics {
-                bundle_size_mb: Some(14.2),
+                // The release binary alone (compares against binary_size)…
+                bundle_size_mb: Some(12.0),
+                // …and the shipped bundle, binary + payload (compares
+                // against bundle_size).
+                shipped_bundle_size_mb: Some(14.2),
                 memory_before_mb: Some(200.0),
                 memory_after_mb: Some(120.0),
                 startup_before_ms: Some(400.0),
@@ -803,7 +824,7 @@ mod tests {
 
         // An actual above the high bound is outside.
         let mut high_measurements = test_measurements();
-        high_measurements.metrics.bundle_size_mb = Some(30.0);
+        high_measurements.metrics.shipped_bundle_size_mb = Some(30.0);
         let outside = compare_prediction(&record.predictions[0], &high_measurements);
         assert_eq!(outside.inside, Some(false));
         assert!(outside.abs_error.unwrap() > 0.0);
@@ -849,7 +870,7 @@ mod tests {
     fn metrics_missing_from_measurements_are_reported_not_compared() {
         let record = test_record();
         let mut measurements = test_measurements();
-        measurements.metrics.bundle_size_mb = None;
+        measurements.metrics.shipped_bundle_size_mb = None;
         measurements.metrics.process_count = None;
         let bundle = compare_prediction(&record.predictions[0], &measurements);
         assert_eq!(bundle.actual, None);
@@ -857,6 +878,73 @@ mod tests {
         let procs = compare_prediction(&record.predictions[3], &measurements);
         assert_eq!(procs.actual, None);
         assert!(procs.note.contains("no actual measurement"));
+    }
+
+    // Like-with-like (2026-11-25 correction): a binary-alone
+    // measurement compares against `binary_size`, and `bundle_size` is
+    // uncompared without a shipped-bundle measurement — never silently
+    // scored as a miss. Five campaign log entries did exactly the wrong
+    // comparison (22–27 MB binaries vs 42–400 MB bundle intervals, 0/5
+    // inside) and widened future intervals on a units mismatch.
+    #[test]
+    fn binary_measurement_compares_against_binary_size_never_against_bundle_size() {
+        let record = PredictionsRecord {
+            predictions: vec![
+                RecordPrediction {
+                    metric: "bundle_size".to_string(),
+                    low: Some(11.4),
+                    point: Some(15.4),
+                    high: Some(23.4),
+                    unit: "MB".to_string(),
+                    confidence: Confidence::High,
+                    basis: "test".to_string(),
+                },
+                RecordPrediction {
+                    metric: "binary_size".to_string(),
+                    low: Some(11.0),
+                    point: Some(11.4),
+                    high: Some(17.4),
+                    unit: "MB".to_string(),
+                    confidence: Confidence::High,
+                    basis: "test".to_string(),
+                },
+            ],
+            ..test_record()
+        };
+        let mut measurements = test_measurements();
+        measurements.metrics.shipped_bundle_size_mb = None;
+
+        // Binary 12.0 MB lands inside the binary interval 11.0–17.4…
+        let binary = compare_prediction(&record.predictions[1], &measurements);
+        assert_eq!(binary.actual, Some(12.0));
+        assert_eq!(binary.inside, Some(true));
+        // …while the bundle prediction is uncompared, not a miss.
+        let bundle = compare_prediction(&record.predictions[0], &measurements);
+        assert_eq!(bundle.actual, None);
+        assert!(bundle.note.contains("no actual measurement"));
+
+        // A binary above the binary interval is an outside BINARY
+        // comparison — the bundle is still uncompared, never a miss.
+        measurements.metrics.bundle_size_mb = Some(30.0);
+        let binary = compare_prediction(&record.predictions[1], &measurements);
+        assert_eq!(binary.inside, Some(false));
+        let bundle = compare_prediction(&record.predictions[0], &measurements);
+        assert_eq!(bundle.actual, None);
+        assert_eq!(bundle.inside, None);
+    }
+
+    #[test]
+    fn shipped_bundle_compares_against_the_bundle_interval() {
+        let record = test_record();
+        let mut measurements = test_measurements();
+        measurements.metrics.shipped_bundle_size_mb = Some(20.0);
+        let bundle = compare_prediction(&record.predictions[0], &measurements);
+        assert_eq!(bundle.actual, Some(20.0));
+        assert_eq!(bundle.inside, Some(true));
+
+        measurements.metrics.shipped_bundle_size_mb = Some(30.0);
+        let bundle = compare_prediction(&record.predictions[0], &measurements);
+        assert_eq!(bundle.inside, Some(false));
     }
 
     // ---- Full round-trip --------------------------------------------------

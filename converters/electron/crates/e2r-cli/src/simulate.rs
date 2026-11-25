@@ -82,7 +82,7 @@ const SKIP_DIRS: &[&str] = &[
 
 /// Directories that may hold renderer source (same set the converter
 /// checks, in the same order).
-const RENDERER_SOURCE_DIRS: &[&str] = &["src", "renderer", "app", "web"];
+const RENDERER_SOURCE_DIRS: &[&str] = &["src", "renderer", "app", "web", "ts"];
 
 /// Root-level asset directories that may hold renderer files in a static
 /// app (same set the converter copies for a static renderer).
@@ -421,12 +421,82 @@ fn percentages(counts: [usize; 3], total: usize) -> (f64, f64, f64) {
 
 // --- UI preservation -------------------------------------------------------
 
-/// Read `package.json` (if present and parsable) for framework/bundler
-/// detection. A missing or broken file is not an error — detection just
-/// has less to work with.
+/// Read `package.json` for framework/bundler detection — merged across
+/// the whole tree, not just the root. A missing or broken file is not an
+/// error — detection just has less to work with.
+///
+/// Monorepos keep their framework/bundler dependencies in a workspace
+/// package (`react` in GitHub Desktop's `app/package.json`, `rolldown`
+/// config at Signal's root with its deps in the root package, `vite`
+/// in Joplin's `packages/app-desktop/`): reading only the root package
+/// reports "unknown" / "none" for a real, large renderer. Every
+/// `package.json` up to depth 3 is merged (root wins on key conflicts);
+/// `node_modules`, build output, version control, and test dirs are
+/// skipped.
 fn read_package_json(app_dir: &Path) -> Option<JsonValue> {
-    let text = fs::read_to_string(app_dir.join("package.json")).ok()?;
-    serde_json::from_str(&text).ok()
+    let mut merged = serde_json::Map::new();
+    let mut found = false;
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for entry in WalkDir::new(app_dir)
+        .max_depth(3)
+        .into_iter()
+        .filter_entry(|e| {
+            if e.depth() == 0 {
+                return true;
+            }
+            if !e.file_type().is_dir() {
+                return true;
+            }
+            e.file_name()
+                .to_str()
+                .map(|n| {
+                    !(SKIP_DIRS.contains(&n)
+                        || n == "node_modules"
+                        || n == "target"
+                        || crate::scan::is_test_path(n))
+                })
+                .unwrap_or(false)
+        })
+        .flatten()
+    {
+        if entry.file_type().is_file() && entry.file_name().to_str() == Some("package.json") {
+            paths.push(entry.path().to_path_buf());
+        }
+    }
+    paths.sort();
+    for path in paths {
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(pkg) = serde_json::from_str::<JsonValue>(&text) else {
+            continue;
+        };
+        let Some(obj) = pkg.as_object() else {
+            continue;
+        };
+        found = true;
+        for (key, value) in obj {
+            if key == "dependencies" || key == "devDependencies" || key == "scripts" {
+                let target = merged
+                    .entry(key.clone())
+                    .or_insert_with(|| JsonValue::Object(serde_json::Map::new()));
+                if let (Some(target_obj), Some(value_obj)) =
+                    (target.as_object_mut(), value.as_object())
+                {
+                    for (dep, version) in value_obj {
+                        target_obj.entry(dep.clone()).or_insert(version.clone());
+                    }
+                }
+            } else {
+                merged.entry(key.clone()).or_insert(value.clone());
+            }
+        }
+    }
+    if found {
+        Some(JsonValue::Object(merged))
+    } else {
+        None
+    }
 }
 
 /// Dependency names from `dependencies` + `devDependencies`.
@@ -480,29 +550,67 @@ fn detect_framework(pkg: &Option<JsonValue>, has_renderer: bool) -> &'static str
 }
 
 /// Detect the bundler from `package.json` deps and scripts: `vite`,
-/// `webpack`, `electron-vite`, `next`, `other` (parcel, react-scripts,
-/// esbuild, rollup), or `none`.
-fn detect_bundler(pkg: &Option<JsonValue>) -> &'static str {
+/// `webpack`, `electron-vite`, `rolldown`, `next`, `other` (parcel,
+/// react-scripts, esbuild, rollup), or `none`.
+///
+/// A script only counts when it *runs* the bundler: the bundler name
+/// must be a whole word (or the tail of a path, `node_modules/.bin/vite`),
+/// not a substring. VS Code's scripts mention `build/vite` paths
+/// (component-explorer install scripts) while the workbench builds with
+/// gulp/esbuild — the old substring check reported "vite" for it. A
+/// bundler config file (`vite.config.*`, `rolldown.config.*`) at the app
+/// root also counts.
+fn detect_bundler(pkg: &Option<JsonValue>, app_dir: Option<&Path>) -> &'static str {
     let deps = dep_names(pkg);
     let scripts = script_texts(pkg);
-    let in_scripts = |needle: &str| scripts.iter().any(|s| s.contains(needle));
+    // Whole-word tokens from the scripts (split on whitespace and shell
+    // separators): `vite build` → ["vite", "build"]; `node
+    // build/vite/x.tgz` → ["node", "build/vite/x.tgz"] — the latter is
+    // NOT a vite hit.
+    let tokens: BTreeSet<String> = scripts
+        .iter()
+        .flat_map(|s| {
+            s.split(|c: char| {
+                c.is_whitespace() || c == '&' || c == ';' || c == '|' || c == '(' || c == ')'
+            })
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+        })
+        .collect();
+    let runs = |needle: &str| {
+        tokens.iter().any(|t| {
+            t == needle
+                || t.ends_with(&format!("/{needle}"))
+                || t.starts_with(&format!("{needle}/"))
+        })
+    };
+    let has_config = |prefix: &str| -> bool {
+        let Some(dir) = app_dir else {
+            return false;
+        };
+        ["js", "mjs", "cjs", "ts", "mts", "cts"]
+            .iter()
+            .any(|ext| dir.join(format!("{prefix}.config.{ext}")).is_file())
+    };
     // electron-vite first: its scripts also contain "vite".
-    if deps.contains("electron-vite") || in_scripts("electron-vite") {
+    if deps.contains("electron-vite") || runs("electron-vite") || has_config("electron-vite") {
         "electron-vite"
-    } else if deps.contains("vite") || in_scripts("vite") {
+    } else if deps.contains("rolldown") || runs("rolldown") || has_config("rolldown") {
+        "rolldown"
+    } else if deps.contains("vite") || runs("vite") || has_config("vite") {
         "vite"
-    } else if deps.contains("webpack") || in_scripts("webpack") {
+    } else if deps.contains("webpack") || runs("webpack") || has_config("webpack") {
         "webpack"
-    } else if deps.contains("next") || in_scripts("next") {
+    } else if deps.contains("next") || runs("next") {
         "next"
     } else if deps.contains("parcel")
         || deps.contains("react-scripts")
         || deps.contains("esbuild")
         || deps.contains("rollup")
-        || in_scripts("parcel")
-        || in_scripts("react-scripts")
-        || in_scripts("esbuild")
-        || in_scripts("rollup")
+        || runs("parcel")
+        || runs("react-scripts")
+        || runs("esbuild")
+        || runs("rollup")
     {
         "other"
     } else {
@@ -538,13 +646,15 @@ fn normalize_rel(path: &str) -> &str {
 }
 
 /// Renderer source files to scan for Electron-API touch points:
-/// the renderer source dirs (when the converter carried source), the
-/// root `index.html` / root scripts (Vite root layout and static apps),
-/// and the static asset dirs (static apps). The main-process entry and
+/// the converter's renderer source dir (when one was found — a monorepo
+/// dir such as `app/src/ui/`, not the fixed root set), the root
+/// `index.html` / root scripts (Vite root layout and static apps), and
+/// the static asset dirs (static apps). The main-process entry and
 /// preload scripts are excluded — they are not UI, and preload is
-/// replaced by the bridge rather than carried over. Built output is
-/// never scanned: it is generated code, and its line numbers would be
-/// meaningless.
+/// replaced by the bridge rather than carried over. Test / spec files
+/// are excluded too: a Testing Library helper is not renderer code that
+/// ships. Built output is never scanned: it is generated code, and its
+/// line numbers would be meaningless.
 fn renderer_source_files(app_dir: &Path, plan: &RendererPlan, report: &ScanReport) -> Vec<PathBuf> {
     if matches!(plan.kind, RendererKind::Placeholder) {
         return Vec::new();
@@ -560,7 +670,9 @@ fn renderer_source_files(app_dir: &Path, plan: &RendererPlan, report: &ScanRepor
         .iter()
         .map(|p| normalize_rel(p))
         .collect();
-    let excluded = |rel: &str| -> bool { main_entry == Some(rel) || preloads.contains(rel) };
+    let excluded = |rel: &str| -> bool {
+        main_entry == Some(rel) || preloads.contains(rel) || crate::scan::is_test_path(rel)
+    };
     let is_renderer_file = |path: &Path| -> bool {
         path.extension()
             .and_then(|e| e.to_str())
@@ -569,8 +681,37 @@ fn renderer_source_files(app_dir: &Path, plan: &RendererPlan, report: &ScanRepor
     };
     let mut files: BTreeSet<PathBuf> = BTreeSet::new();
 
+    // The converter's renderer source dir, when one was found. (Falls
+    // back to the fixed root dirs below when the plan carries source but
+    // no specific dir was recorded.)
+    if let Some(source_dir) = &plan.source_dir {
+        let base = app_dir.join(source_dir);
+        if base.is_dir() {
+            for entry in WalkDir::new(&base)
+                .into_iter()
+                .filter_entry(|e| {
+                    !(e.file_type().is_dir()
+                        && e.file_name()
+                            .to_str()
+                            .map(|n| SKIP_DIRS.contains(&n))
+                            .unwrap_or(false))
+                })
+                .flatten()
+            {
+                if !entry.file_type().is_file() || !is_renderer_file(entry.path()) {
+                    continue;
+                }
+                let rel = relative_path(app_dir, entry.path());
+                if excluded(&rel) {
+                    continue;
+                }
+                files.insert(entry.path().to_path_buf());
+            }
+        }
+    }
+
     // Renderer source dirs, when the converter carried source.
-    if plan.source_carried {
+    if plan.source_carried && plan.source_dir.is_none() {
         for dir in RENDERER_SOURCE_DIRS {
             let base = app_dir.join(dir);
             if !base.is_dir() {
@@ -788,7 +929,7 @@ fn ui_preservation(
     let has_renderer = !matches!(plan.kind, RendererKind::Placeholder);
     let framework = detect_framework(pkg, has_renderer);
     let bundler = if has_renderer {
-        detect_bundler(pkg)
+        detect_bundler(pkg, Some(app_dir))
     } else {
         "none"
     };
@@ -958,8 +1099,9 @@ fn range3(low: f64, point: f64, high: f64) -> Range {
     Range::new(round3(low), round3(point), round3(high))
 }
 
-/// Total size in bytes of `dir`, skipping directories in `skip` by name.
-fn dir_size_bytes(dir: &Path, skip: &[&str]) -> u64 {
+/// Total size in bytes of `dir`, skipping directories in `skip_dirs` by
+/// name and files whose name is in `skip_files`.
+fn dir_size_bytes(dir: &Path, skip_dirs: &[&str], skip_files: &[&str]) -> u64 {
     let mut total = 0u64;
     for entry in WalkDir::new(dir)
         .into_iter()
@@ -968,23 +1110,59 @@ fn dir_size_bytes(dir: &Path, skip: &[&str]) -> u64 {
                 && e.file_type().is_dir()
                 && e.file_name()
                     .to_str()
-                    .map(|n| skip.contains(&n))
+                    .map(|n| skip_dirs.contains(&n))
                     .unwrap_or(false))
         })
         .flatten()
     {
-        if entry.file_type().is_file() {
+        if entry.file_type().is_file()
+            && entry
+                .file_name()
+                .to_str()
+                .map(|n| !skip_files.contains(&n))
+                .unwrap_or(false)
+        {
             total += entry.metadata().map(|m| m.len()).unwrap_or(0);
         }
     }
     total
 }
 
+/// Files and directories e2r itself writes into the app directory when
+/// `scan` / `simulate` / `calibrate` are run there (the proof campaign
+/// stores its outputs in the app dir). They are e2r's output, not the
+/// app — a second `simulate` must not count the first run's outputs as
+/// app payload, or the payload grows by the size of its own report on
+/// every run. (A real app file that happens to share one of these names
+/// would be excluded too; the names are e2r's output names by
+/// convention, and no proof app has one.)
+const E2R_OWN_OUTPUTS: &[&str] = &[
+    "predictions.json",
+    "scan.json",
+    "scan.txt",
+    "simulate.json",
+    "simulate.txt",
+    "ACCURACY.md",
+    "META.md",
+    "COMPLAINTS.md",
+    "COMPLAINT-RANKING.md",
+    "LICENSES.md",
+    "SCAN-SUMMARY.md",
+];
+
 /// The app's own payload in MB: every file under the app dir except
-/// `node_modules` and version control. Built output counts — it ships in
-/// both bundles.
+/// `node_modules` and version control — and except e2r's own outputs
+/// (see [`E2R_OWN_OUTPUTS`]). Built output counts — it ships in both
+/// bundles.
 fn measure_app_payload_mb(app_dir: &Path) -> f64 {
-    round3(dir_size_bytes(app_dir, &["node_modules", ".git", ".hg", ".svn"]) as f64 / BYTES_PER_MB)
+    round3(
+        dir_size_bytes(
+            app_dir,
+            &["node_modules", ".git", ".hg", ".svn", ".e2r"],
+            E2R_OWN_OUTPUTS,
+        ) as f64
+            / BYTES_PER_MB,
+    )
 }
 
 /// The installed Electron runtime in MB, measured from
@@ -997,7 +1175,7 @@ fn measure_installed_electron_mb(app_dir: &Path) -> Option<f64> {
     if !dist.is_dir() {
         return None;
     }
-    let mb = round3(dir_size_bytes(&dist, &[]) as f64 / BYTES_PER_MB);
+    let mb = round3(dir_size_bytes(&dist, &[], &[]) as f64 / BYTES_PER_MB);
     if mb < reference::MEASURED_RUNTIME_MIN_MB.value {
         return None;
     }
@@ -1059,6 +1237,52 @@ fn count_plugins(report: &ScanReport) -> (usize, Vec<&'static str>) {
 }
 
 /// Bundle/installer size prediction, before → after, in MB.
+/// One-line plugin summary for a bundle/binary basis string.
+fn plugin_note(plugin_count: usize, plugin_names: &[&str]) -> String {
+    if plugin_names.is_empty() {
+        "no plugins".to_string()
+    } else {
+        format!("{} plugin(s): {}", plugin_count, plugin_names.join(", "))
+    }
+}
+
+/// The release binary alone, without the app payload: the zero-plugin
+/// release binary (11.0–17.4 MB, point 11.4 MB) plus ~2 MB per plugin.
+/// This is the quantity a measured release binary compares against.
+/// The `bundle_size` prediction is binary + payload, so scoring a
+/// binary-alone measurement against it is a units mismatch — the
+/// 2026-11-25 calibration correction (RND.md §11): five `bundle_size`
+/// log entries compared 22–27 MB binaries against 42–400 MB bundle
+/// intervals and reported 0/5 inside, which was never a model failure.
+/// `before` is `None`: there is no single Electron binary to compare
+/// against (the Electron side ships a runtime + payload, not one
+/// binary), so the binary prediction is after-only.
+fn binary_size_prediction(plugin_count: usize, plugin_names: &[&str]) -> Prediction {
+    let floor = reference::TAURI_BINARY_ZERO_PLUGIN_MB;
+    let per_plugin = reference::TAURI_PER_PLUGIN_MB;
+    let plugins = plugin_count as f64;
+    let after = range3(
+        floor.low + per_plugin.low * plugins,
+        floor.point + per_plugin.point * plugins,
+        floor.high + per_plugin.high * plugins,
+    );
+    Prediction {
+        metric: "binary_size".to_string(),
+        before: None,
+        after: Some(after),
+        unit: "MB".to_string(),
+        confidence: Confidence::High,
+        basis: format!(
+            "measured e2r output: 0-plugin release binary 11.0–17.4 MB (point 11.4 MB, Tauri 2.12.7, Linux, unstripped) + ~2 MB per plugin ({}) — the release binary alone, without the app payload (see bundle_size) — RND.md §11",
+            plugin_note(plugin_count, plugin_names)
+        ),
+        assumptions: vec![
+            "The after range is the default-profile release binary e2r produces today (no [profile.release], unstripped); its high end absorbs the unexplained ~6 MB variance between two near-identical e2r outputs (RND.md §11)".to_string(),
+            "Compare this prediction only against a measured release binary (measurements.json `bundle_size_mb`); the shipped bundle (binary + payload) compares against `bundle_size`, not this metric".to_string(),
+        ],
+    }
+}
+
 ///
 /// The after value is modeled from **measured e2r outputs**: the
 /// zero-plugin release binary (11.0–17.4 MB, point 11.4 MB — the
@@ -1091,11 +1315,7 @@ fn bundle_prediction(
         floor.point + per_plugin.point * plugins + payload_mb,
         floor.high + per_plugin.high * plugins + payload_mb,
     );
-    let plugin_note = if plugin_names.is_empty() {
-        "no plugins".to_string()
-    } else {
-        format!("{} plugin(s): {}", plugin_count, plugin_names.join(", "))
-    };
+    let plugin_note = plugin_note(plugin_count, plugin_names);
     let after_basis = format!(
         "measured e2r output: 0-plugin release binary 11.0–17.4 MB (point 11.4 MB, Tauri 2.12.7, Linux, unstripped) + ~2 MB per plugin ({plugin_note}) + measured app payload ({payload_mb} MB) — RND.md §11"
     );
@@ -1345,6 +1565,7 @@ fn predict(
 ) -> Vec<Prediction> {
     let mut predictions = vec![
         bundle_prediction(payload_mb, runtime_mb, plugin_count, plugin_names),
+        binary_size_prediction(plugin_count, plugin_names),
         memory_prediction(platform),
         startup_prediction(),
         process_prediction(report.windows.len(), !report.windows.is_empty(), platform),
@@ -2554,11 +2775,58 @@ mod tests {
                 "{name}: after point must be ~{point} MB + payload, got {}",
                 after.point
             );
+            // Like-with-like: the measured release binary compares
+            // against the BINARY interval (binary point exactly the
+            // model value — no payload), never against the bundle
+            // interval. The old assertion checked the binary against
+            // the bundle range; it passed only because that interval
+            // is wide, and it is the same units mismatch that produced
+            // the 0/5 campaign calibration (RND.md §11).
+            let binary = report
+                .predictions
+                .iter()
+                .find(|p| p.metric == "binary_size")
+                .expect("binary prediction");
+            let binary_after = binary.after.expect("binary after range");
+            assert_eq!(
+                binary_after.point, point,
+                "{name}: binary point must be exactly the model value {point} MB, got {}",
+                binary_after.point
+            );
             assert!(
-                after.low <= measured_mb && measured_mb <= after.high,
-                "{name}: the measured release binary ({measured_mb} MB) must fall inside the predicted after range {after:?}"
+                binary_after.low <= measured_mb && measured_mb <= binary_after.high,
+                "{name}: the measured release binary ({measured_mb} MB) must fall inside the predicted binary range {binary_after:?}"
+            );
+            // The binary prediction sits right after the bundle one.
+            let bundle_idx = report
+                .predictions
+                .iter()
+                .position(|p| p.metric == "bundle_size")
+                .expect("bundle index");
+            assert_eq!(
+                report.predictions[bundle_idx + 1].metric,
+                "binary_size",
+                "{name}: binary_size must follow bundle_size in the predictions"
             );
         }
+    }
+
+    #[test]
+    fn binary_size_prediction_is_the_bundle_without_payload() {
+        // 0 plugins: exactly the zero-plugin floor.
+        let zero = binary_size_prediction(0, &[]);
+        let after = zero.after.expect("after range");
+        assert_eq!((after.low, after.point, after.high), (11.0, 11.4, 17.4));
+        assert_eq!(zero.before, None, "no Electron binary baseline exists");
+        // 2 plugins: floor + 2 × per-plugin, still no payload.
+        let two = binary_size_prediction(2, &["tauri-plugin-dialog", "tauri-plugin-store"]);
+        let after = two.after.expect("after range");
+        assert_eq!((after.low, after.point, after.high), (12.0, 15.4, 22.4));
+        assert!(
+            two.basis.contains("without the app payload"),
+            "the basis must say what the number excludes: {}",
+            two.basis
+        );
     }
 
     // ---- Reconciled model: per-platform memory -----------------------------
@@ -2772,5 +3040,99 @@ mod tests {
             "a missing calibration log must not change the report"
         );
         fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---- Proof-campaign fix round ------------------------------------
+
+    #[test]
+    fn simulate_payload_excludes_e2r_outputs() {
+        // The second `simulate` run used to inflate the payload by
+        // counting the first run's outputs (predictions.json, scan /
+        // simulate outputs, .e2r/, proof notes) as app payload.
+        let app = fresh_test_dir("payload-exclusion");
+        let big = vec![b'x'; 1_000_000];
+        fs::write(app.join("main.js"), &big).expect("write app file");
+        let before = measure_app_payload_mb(&app);
+        assert!(
+            (before - 1.0).abs() < 0.01,
+            "one 1 MB app file must measure ~1 MB; got {before}"
+        );
+        // e2r's own outputs, same size again: the payload must not move.
+        fs::write(app.join("predictions.json"), &big).expect("write predictions");
+        fs::write(app.join("scan.json"), &big).expect("write scan.json");
+        fs::write(app.join("scan.txt"), &big).expect("write scan.txt");
+        fs::write(app.join("simulate.json"), &big).expect("write simulate.json");
+        fs::write(app.join("ACCURACY.md"), &big).expect("write accuracy");
+        fs::write(app.join("META.md"), &big).expect("write meta");
+        fs::create_dir_all(app.join(".e2r")).expect("create .e2r");
+        fs::write(app.join(".e2r").join("state.json"), &big).expect("write .e2r file");
+        let after = measure_app_payload_mb(&app);
+        assert_eq!(
+            before, after,
+            "e2r outputs must not count as app payload (before {before}, after {after})"
+        );
+        fs::remove_dir_all(&app).ok();
+    }
+
+    #[test]
+    fn bundler_detection_ignores_vite_substring_and_finds_rolldown() {
+        // VS Code's scripts mention build/vite paths while the workbench
+        // builds with gulp/esbuild — the old substring check reported
+        // "vite" for it.
+        let vite_path = serde_json::json!({
+            "scripts": {
+                "build": "node build/vite/install.mjs",
+                "postinstall": "node build/vite/download.mjs"
+            }
+        });
+        assert_eq!(
+            detect_bundler(&Some(vite_path), None),
+            "none",
+            "a build/vite *path* is not the vite bundler"
+        );
+        // Real vite still detects, by dep or by whole-word script token.
+        let real_vite = serde_json::json!({
+            "devDependencies": { "vite": "^5.0.0" },
+            "scripts": { "build": "vite build" }
+        });
+        assert_eq!(detect_bundler(&Some(real_vite), None), "vite");
+        // Signal's bundler: rolldown, by dep or by script token.
+        let rolldown_dep = serde_json::json!({ "devDependencies": { "rolldown": "^1.0.0" } });
+        assert_eq!(detect_bundler(&Some(rolldown_dep), None), "rolldown");
+        let rolldown_script = serde_json::json!({
+            "scripts": { "build": "rolldown -c rolldown.config.ts" }
+        });
+        assert_eq!(detect_bundler(&Some(rolldown_script), None), "rolldown");
+    }
+
+    #[test]
+    fn merged_package_json_sees_nested_framework_deps() {
+        // GitHub Desktop keeps react in app/package.json; the root
+        // package.json has no framework dep. Reading only the root
+        // reported the framework as "unknown".
+        let app = fresh_test_dir("merged-pkg");
+        write_test_file(
+            &app,
+            "package.json",
+            r#"{"name":"root","version":"0.0.1","scripts":{"build":"npm run build --workspaces"}}"#,
+        );
+        write_test_file(
+            &app,
+            "app/package.json",
+            r#"{"name":"app","version":"1.0.0","dependencies":{"react":"^18.0.0","react-dom":"^18.0.0"},"devDependencies":{"webpack":"^5.0.0"}}"#,
+        );
+        let pkg = read_package_json(&app);
+        assert!(
+            dep_names(&pkg).contains("react"),
+            "nested react dep must be visible; deps: {:?}",
+            dep_names(&pkg)
+        );
+        assert_eq!(
+            detect_framework(&pkg, true),
+            "react",
+            "framework must come from the nested package"
+        );
+        assert_eq!(detect_bundler(&pkg, Some(&app)), "webpack");
+        fs::remove_dir_all(&app).ok();
     }
 }

@@ -1876,6 +1876,13 @@ pub(crate) struct RendererPlan {
     /// Whether renderer source was copied (also true when built output
     /// won and the source came along for rebuilds).
     pub(crate) source_carried: bool,
+    /// The renderer source directory relative to the app root, when one
+    /// was found (e.g. `"src"`, `"app/src/ui"`, `"packages/app-desktop"`).
+    /// The simulator scans this directory — not the fixed root
+    /// `src/` / `renderer/` / `app/` / `web/` set — for Electron-API
+    /// touch points, so a monorepo renderer is not mistaken for the
+    /// whole app tree.
+    pub(crate) source_dir: Option<String>,
     /// Whether the copied build output looks stale (source newer).
     pub(crate) stale_build_output: bool,
     /// Files actually copied (filled in by the copy step).
@@ -1903,6 +1910,7 @@ impl Default for RendererPlan {
             details: Vec::new(),
             caveats: Vec::new(),
             source_carried: false,
+            source_dir: None,
             stale_build_output: false,
             copied_files: 0,
             copied_bytes: 0,
@@ -1920,6 +1928,7 @@ enum Bundler {
     ReactScripts,
     Parcel,
     ElectronVite,
+    Rolldown,
 }
 
 impl Bundler {
@@ -1929,6 +1938,8 @@ impl Bundler {
             Bundler::Webpack => 8080,
             Bundler::Next | Bundler::ReactScripts => 3000,
             Bundler::Parcel => 1234,
+            // Rolldown has no dev server of its own; the Tauri default.
+            Bundler::Rolldown => 1420,
         }
     }
 
@@ -1940,6 +1951,7 @@ impl Bundler {
             Bundler::ReactScripts => "Create React App",
             Bundler::Parcel => "Parcel",
             Bundler::ElectronVite => "electron-vite",
+            Bundler::Rolldown => "rolldown",
         }
     }
 }
@@ -1958,19 +1970,106 @@ struct DevServer {
 }
 
 /// Build-output directories checked (in order) for a built renderer:
-/// the first one containing an `index.html` wins.
-const BUILD_OUTPUT_DIRS: &[&str] = &["dist", "build", "out"];
+/// the first one containing an `index.html` wins. `bundles/` is
+/// Signal's rolldown output directory.
+const BUILD_OUTPUT_DIRS: &[&str] = &["dist", "build", "out", "bundles"];
 
 /// Directories that may hold renderer source, checked in order.
-const SOURCE_DIRS: &[&str] = &["src", "renderer", "app", "web"];
+/// `ts/` is Signal's renderer home (rolldown bundles it into `bundles/`).
+const SOURCE_DIRS: &[&str] = &["src", "renderer", "app", "web", "ts"];
 
 /// Subdirectories of a source dir that may hold the renderer one level
 /// down (e.g. `src/renderer/` in electron-vite / electron-react-boilerplate
-/// layouts). The whole top-level dir is copied, preserving relative paths.
-const NESTED_SOURCE_DIRS: &[&str] = &["renderer", "app", "web"];
+/// layouts, `app/src/ui/` in GitHub Desktop's monorepo layout). The whole
+/// top-level dir is copied, preserving relative paths.
+const NESTED_SOURCE_DIRS: &[&str] = &["renderer", "app", "web", "src", "ui", "gui"];
 
 /// File stems that mark a renderer entry point inside a source dir.
-const RENDERER_ENTRY_STEMS: &[&str] = &["main", "index", "renderer", "App"];
+const RENDERER_ENTRY_STEMS: &[&str] = &["main", "index", "renderer", "App", "app"];
+
+/// Directory names the recursive renderer search never descends into.
+/// `examples/` and friends are last: a renderer never lives under an
+/// example, demo, sample, sandbox, or playground tree (Insomnia's
+/// `examples/insomnia-plugin-sandbox-demo` was copied as the renderer
+/// before this list grew — see `is_renderer_search_skip_dir`).
+const RENDERER_SEARCH_SKIP_DIRS: &[&str] = &[
+    "node_modules",
+    "dist",
+    "build",
+    "out",
+    "bundles",
+    ".git",
+    ".hg",
+    ".svn",
+    "target",
+    "test",
+    "tests",
+    "spec",
+    "specs",
+    "__tests__",
+    "fixtures",
+    "playwright",
+    "e2e",
+    "integration-tests",
+    "extensions",
+    "docs",
+    "scripts",
+    "tools",
+    "examples",
+    "example",
+    "demo",
+    "demos",
+    "sample",
+    "samples",
+    "sandbox",
+    "playground",
+];
+
+/// Directory-name fragments that mark a dir as a non-shipped
+/// example/demo/sample tree, matched case-insensitively against the
+/// dir name: a renderer never lives under one (a `*-demo` plugin
+/// sandbox, a `sample-app`). Catches names the exact list above
+/// misses, e.g. `insomnia-plugin-sandbox-demo`.
+const NON_SHIPPED_DIR_FRAGMENTS: &[&str] = &["example", "demo", "sample", "sandbox", "playground"];
+
+/// Whether a directory name is skipped by the recursive renderer
+/// search: an exact skip-dir name, a hidden dir, or a name containing
+/// a non-shipped fragment.
+fn is_renderer_search_skip_dir(name: &str) -> bool {
+    if RENDERER_SEARCH_SKIP_DIRS.contains(&name) || name.starts_with('.') {
+        return true;
+    }
+    let lower = name.to_ascii_lowercase();
+    NON_SHIPPED_DIR_FRAGMENTS
+        .iter()
+        .any(|frag| lower.contains(frag))
+}
+
+/// Minimum `.tsx`/`.jsx` files for a dir to count as a dense renderer
+/// candidate without an entry file (Joplin's `gui/` and Insomnia's
+/// `src/` have no entry file at all — only density marks them).
+const DENSE_RENDERER_MIN_TSX: usize = 10;
+
+/// Upper bound on `.tsx`/`.jsx` files counted per candidate dir:
+/// high enough that real renderer trees count exactly (Signal's `ts/`
+/// holds 1,159), low enough to bound the walk. Above the cap the
+/// ranking degrades to ties, broken by entry/depth/lexicographic
+/// order — never to a wrong pick from an uncounted file.
+const RENDERER_COUNT_CAP: usize = 2000;
+
+/// A container dir is dropped when a descendant holds at least this
+/// fraction of its renderer files: the parent adds (almost) nothing
+/// of its own, so it is a package/container dir, not the renderer
+/// (`packages/app-desktop/` holds 158 `.tsx` files, 154 of them under
+/// its `gui/` — the 4 outside are plugin webviews, not a second
+/// renderer).
+const CONTAINER_COLLAPSE_FRACTION: f64 = 0.9;
+
+/// Directory names that hold a static HTML shell rather than renderer
+/// source: when the only entry found is an `index.html` inside one of
+/// these, the *parent* directory is the renderer source (Mailspring's
+/// `app/static/index.html` → `app/`).
+const STATIC_SHELL_DIRS: &[&str] = &["static", "public", "assets", "www"];
 
 /// Extensions of a renderer entry file.
 const RENDERER_ENTRY_EXTS: &[&str] = &["js", "jsx", "ts", "tsx", "mjs", "cjs"];
@@ -2009,6 +2108,10 @@ const BUILD_CONFIG_FILES: &[&str] = &[
     "rollup.config.mjs",
     "rollup.config.cjs",
     "rollup.config.ts",
+    "rolldown.config.js",
+    "rolldown.config.mjs",
+    "rolldown.config.cjs",
+    "rolldown.config.ts",
     "electron-vite.config.js",
     "electron-vite.config.mjs",
     "electron-vite.config.cjs",
@@ -2139,6 +2242,7 @@ pub(crate) fn detect_renderer(
         .map(str::to_string);
     let bundler = pkg_ref.and_then(detect_bundler);
     let source_dir = find_source_dir(app_dir, main_entry, &preloads);
+    plan.source_dir = source_dir.clone();
     let root_index = app_dir.join("index.html").is_file();
     let dev_server = pkg_ref.and_then(|p| detect_dev_server(app_dir, p));
 
@@ -2437,55 +2541,92 @@ fn renderer_summary(
 }
 
 /// The first build-output directory containing an `index.html`, if any.
+/// Root first (`dist/` / `build/` / `out/`), then package dirs one level
+/// down (`app/dist/`, `packages/app-desktop/dist/`, ...).
 fn find_build_output(app_dir: &Path) -> Option<String> {
     for dir in BUILD_OUTPUT_DIRS {
         if app_dir.join(dir).join("index.html").is_file() {
             return Some(dir.to_string());
         }
     }
-    None
-}
-
-/// The source directory holding the renderer, if any: the first of
-/// `src/` / `renderer/` / `app/` / `web/` with a renderer entry file
-/// directly inside it or one level down (`src/renderer/`, ...).
-fn find_source_dir(
-    app_dir: &Path,
-    main_entry: Option<&str>,
-    preloads: &[String],
-) -> Option<String> {
-    for dir in SOURCE_DIRS {
-        let base = app_dir.join(dir);
-        if !base.is_dir() {
+    let mut nested: Vec<String> = Vec::new();
+    for entry in WalkDir::new(app_dir)
+        .max_depth(2)
+        .into_iter()
+        .filter_entry(|e| {
+            if e.depth() == 0 {
+                return true;
+            }
+            if !e.file_type().is_dir() {
+                return true;
+            }
+            e.file_name()
+                .to_str()
+                .map(|n| {
+                    !RENDERER_SEARCH_SKIP_DIRS.contains(&n)
+                        && !n.starts_with('.')
+                        && !BUILD_OUTPUT_DIRS.contains(&n)
+                })
+                .unwrap_or(false)
+        })
+        .flatten()
+    {
+        if !entry.file_type().is_dir() || entry.depth() == 0 {
             continue;
         }
-        if dir_has_renderer_entry(app_dir, &base, main_entry, preloads) {
-            return Some(dir.to_string());
-        }
-        for sub in NESTED_SOURCE_DIRS {
-            let nested = base.join(sub);
-            if nested.is_dir() && dir_has_renderer_entry(app_dir, &nested, main_entry, preloads) {
-                return Some(dir.to_string());
+        let dir = entry.path();
+        for out in BUILD_OUTPUT_DIRS {
+            if dir.join(out).join("index.html").is_file() {
+                let rel = dir
+                    .join(out)
+                    .strip_prefix(app_dir)
+                    .unwrap_or(&dir.join(out))
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                nested.push(rel);
             }
         }
     }
-    None
+    nested.sort();
+    nested.into_iter().next()
 }
 
 /// Whether `dir` holds a renderer entry: an `index.html`, or a
-/// `main`/`index`/`renderer`/`App` script that is not the main-process
-/// entry and not a preload script.
+/// `main`/`index`/`renderer`/`App`/`app` script (among `exts`) that is
+/// not the main-process entry and not a preload script.
+///
+/// The main-process entry is excluded two ways: by exact relative path,
+/// and by stem — a `main.ts` next to a `main.js` main entry is the main
+/// process's source, not a renderer entry (VS Code's `src/main.ts` used
+/// to match the `main` stem and pull all of `src/` in as "renderer").
+/// The stem rule only fires for non-`.tsx`/`.jsx` files that import
+/// Electron: a React renderer's `main.tsx` is a renderer entry even when
+/// the main entry is also called `main`.
+///
+/// The recursive search passes `&["tsx", "jsx"]` only: a barrel
+/// `index.ts` deep inside a library package (Joplin's
+/// `gui/NoteEditor/commands/index.ts`) is a module entry, not a
+/// renderer entry, and counting it would promote library subdirs over
+/// the renderer itself. Plain `.js`/`.ts` renderers are covered by the
+/// fixed source-dir check, which passes [`RENDERER_ENTRY_EXTS`].
 fn dir_has_renderer_entry(
     app_dir: &Path,
     dir: &Path,
     main_entry: Option<&str>,
     preloads: &[String],
+    exts: &[&str],
 ) -> bool {
     if dir.join("index.html").is_file() {
         return true;
     }
+    let main_stem = main_entry.and_then(|m| {
+        Path::new(m)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(str::to_string)
+    });
     for stem in RENDERER_ENTRY_STEMS {
-        for ext in RENDERER_ENTRY_EXTS {
+        for ext in exts {
             let file = dir.join(format!("{stem}.{ext}"));
             if !file.is_file() {
                 continue;
@@ -2502,10 +2643,437 @@ fn dir_has_renderer_entry(
             if preloads.iter().any(|p| p == rel) {
                 continue;
             }
+            if Some(*stem) == main_stem.as_deref() && *ext != "tsx" && *ext != "jsx" {
+                // Same stem as the main entry: only a renderer entry when
+                // it does not import Electron (a main-process source file
+                // does; a plain renderer bootstrap does not).
+                if let Ok(text) = fs::read_to_string(&file) {
+                    if text.contains("require('electron')")
+                        || text.contains("require(\"electron\")")
+                        || text.contains("from 'electron'")
+                        || text.contains("from \"electron\"")
+                    {
+                        continue;
+                    }
+                }
+            }
             return true;
         }
     }
     false
+}
+
+/// Whether a directory is a standalone sub-package (its own
+/// `package.json` without a `main` field — a pure frontend sub-app like
+/// Signal's `sticker-creator`), rather than a renderer dir of the
+/// current package. Such dirs are not renderer candidates: the
+/// sticker-creator is not Signal's renderer.
+fn is_standalone_subpackage(dir: &Path) -> bool {
+    let Ok(text) = fs::read_to_string(dir.join("package.json")) else {
+        return false;
+    };
+    let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    pkg.get("main").is_none()
+}
+
+/// Whether `dir` lives inside a package that is not the app package:
+/// its nearest `package.json` ancestor (excluding the app root itself)
+/// is a *foreign* package. Foreign means one of two things, both
+/// campaign-proven (2026-11-25):
+///
+/// * the owning package sits OUTSIDE the app package's dir — a sibling
+///   sub-app or library (Joplin's `packages/pdf-viewer`, Insomnia's
+///   `examples/insomnia-plugin-sandbox-demo`, whose package dirs are
+///   siblings of the app package, not inside it); or
+/// * the owning package is a standalone sub-app: its `package.json`
+///   has NO `main` field (Signal's `sticker-creator/`, whose `src/`
+///   has no `package.json` of its own but inherits the standalone
+///   parent's). This subsumes [`is_standalone_subpackage`] for nested
+///   dirs.
+///
+/// NOT foreign: packages nested INSIDE the app package that have a
+/// `main` field — Mailspring's 53 `internal_packages/*` (each with
+/// `main: ./lib/main`) are the app's own plugin UI, loaded by its
+/// renderer; the first version of this rule wrongly excluded them and
+/// narrowed Mailspring's renderer from `app/` to `app/src/`, dropping
+/// 215 touch points. With no main entry the app package cannot be
+/// located, so nothing is foreign.
+fn is_in_foreign_package(dir: &Path, app_dir: &Path, main_entry: Option<&str>) -> bool {
+    let Some(main) = main_entry else {
+        return false;
+    };
+    // The app package: nearest `package.json` ancestor of the main
+    // entry (the app root itself when the entry lives there).
+    let main_path = app_dir.join(normalize_rel(main));
+    let mut app_pkg: Option<PathBuf> = None;
+    for anc in main_path.ancestors() {
+        if anc == app_dir {
+            app_pkg = Some(app_dir.to_path_buf());
+            break;
+        }
+        if anc.join("package.json").is_file() {
+            app_pkg = Some(anc.to_path_buf());
+            break;
+        }
+    }
+    let Some(app_pkg) = app_pkg else {
+        return false;
+    };
+    // The owning package of `dir`: nearest `package.json` ancestor
+    // (excluding the app root).
+    let mut owning: Option<PathBuf> = None;
+    for anc in dir.ancestors() {
+        if anc == app_dir {
+            break;
+        }
+        if anc.join("package.json").is_file() {
+            owning = Some(anc.to_path_buf());
+            break;
+        }
+    }
+    let Some(owning) = owning else {
+        return false;
+    };
+    // Standalone sub-app (no `main` field) is always foreign. An
+    // unreadable package.json is treated as having a main field — an
+    // exclusion must rest on evidence, not on a read failure.
+    let has_main = fs::read_to_string(owning.join("package.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .map(|pkg| pkg.get("main").is_some())
+        .unwrap_or(true);
+    if !has_main {
+        return true;
+    }
+    // Otherwise foreign only when the owning package sits outside the
+    // app package's dir.
+    !owning.starts_with(&app_pkg)
+}
+
+/// Drop container candidates: when candidate A is an ancestor of
+/// candidate B and B holds at least [`CONTAINER_COLLAPSE_FRACTION`] of
+/// A's `.tsx`/`.jsx` files, A adds (almost) nothing of its own — it is
+/// a package/container dir, not the renderer. Keeps the deepest dir
+/// holding (nearly) all the files.
+///
+/// Candidates are `(has_stem, tsx_count, depth, rel)`; the input order
+/// does not matter, the output keeps it.
+fn collapse_renderer_containers(
+    mut candidates: Vec<(bool, usize, usize, String)>,
+) -> Vec<(bool, usize, usize, String)> {
+    // Deepest first, so a container is dropped only when a KEPT deeper
+    // candidate already covers it.
+    candidates.sort_by(|a, b| b.2.cmp(&a.2).then(b.1.cmp(&a.1)));
+    let mut kept: Vec<(bool, usize, usize, String)> = Vec::new();
+    for cand in candidates {
+        let covered = cand.1 > 0
+            && kept.iter().any(|k| {
+                k.3.starts_with(&format!("{}/", cand.3))
+                    && (k.1 as f64) >= CONTAINER_COLLAPSE_FRACTION * (cand.1 as f64)
+            });
+        if !covered {
+            kept.push(cand);
+        }
+    }
+    kept
+}
+
+/// Count `.tsx` / `.jsx` files under `dir` (bounded walk, test files
+/// excluded), stopping as soon as `cap` is reached. Used to rank
+/// renderer candidates and for the dense-renderer fallback. Foreign
+/// packages and example/demo trees under `dir` are pruned, not
+/// counted: a sibling sub-app's files must not inflate its parent's
+/// density (`packages/` must not count `packages/pdf-viewer/`'s files
+/// toward its own renderer candidacy).
+///
+/// The walk has NO depth limit on purpose: the count must be
+/// comparable between a dir and its children (the container collapse
+/// compares them), and a depth limit relative to each dir breaks that
+/// — Mailspring's `app/` counted 269 files at depth ≤4 while its
+/// `internal_packages/` counted 260, a 96.7% ratio that collapsed `app/`
+/// away, when the true shares are 464 vs 308 (66%). The `cap` bounds
+/// the work instead: the walk stops as soon as `cap` files are counted
+/// (the density probe uses a cap of 10, so it stays cheap).
+fn count_tsx_files(dir: &Path, cap: usize, app_dir: &Path, main_entry: Option<&str>) -> usize {
+    let mut count = 0usize;
+    for entry in WalkDir::new(dir)
+        .into_iter()
+        .filter_entry(|e| {
+            if e.depth() == 0 {
+                return true;
+            }
+            !(e.file_type().is_dir()
+                && (e
+                    .file_name()
+                    .to_str()
+                    .map(is_renderer_search_skip_dir)
+                    .unwrap_or(false)
+                    || is_in_foreign_package(e.path(), app_dir, main_entry)))
+        })
+        .flatten()
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if ext != "tsx" && ext != "jsx" {
+            continue;
+        }
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name.contains(".test.") || name.contains(".spec.") {
+            continue;
+        }
+        count += 1;
+        if count >= cap {
+            break;
+        }
+    }
+    count
+}
+
+/// Whether `dir` contains the app's main-process source: a file whose
+/// stem matches the main entry's stem and which imports Electron. Such
+/// a dir is the main process's home, not a renderer dir (VS Code's
+/// `src/` holds `src/main.ts`).
+fn dir_contains_main_source(dir: &Path, main_entry: Option<&str>) -> bool {
+    let Some(main) = main_entry else {
+        return false;
+    };
+    let Some(stem) = Path::new(main)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(str::to_string)
+    else {
+        return false;
+    };
+    for entry in WalkDir::new(dir)
+        .max_depth(2)
+        .into_iter()
+        .filter_entry(|e| {
+            !(e.depth() > 0
+                && e.file_type().is_dir()
+                && e.file_name()
+                    .to_str()
+                    .map(|n| RENDERER_SEARCH_SKIP_DIRS.contains(&n))
+                    .unwrap_or(false))
+        })
+        .flatten()
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if path.file_stem().and_then(|s| s.to_str()) != Some(stem.as_str()) {
+            continue;
+        }
+        if let Ok(text) = fs::read_to_string(path) {
+            if text.contains("require('electron')")
+                || text.contains("require(\"electron\")")
+                || text.contains("from 'electron'")
+                || text.contains("from \"electron\"")
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// The source directory holding the renderer, if any: the first of
+/// `src/` / `renderer/` / `app/` / `web/` / `ts/` with a renderer entry
+/// file directly inside it or one level down (`src/renderer/`,
+/// `app/src/ui/`, ...), then a bounded recursive search for monorepo
+/// layouts, then a dense-renderer fallback, then nothing. Returns the
+/// directory relative to the app root, with `/` separators.
+///
+/// The recursive search ranks candidates by `.tsx`/`.jsx` density
+/// first (the renderer holds the most renderer files), then a strict
+/// entry file (`.tsx`/`.jsx` stem or `index.html`), then shallowest,
+/// then lexicographic order. Three guards keep decoys out, all
+/// campaign-proven (2026-11-25): example/demo/sample trees are never
+/// descended into; dirs inside a foreign package (a sibling sub-app
+/// or library, not the app package) are not candidates; and container
+/// dirs that merely hold another candidate's files collapse to the
+/// deepest dir (`packages/app-desktop/` → its `gui/`,
+/// `packages/` → `packages/insomnia/src/`). A dir with no entry file
+/// still counts when it is dense (≥10 `.tsx`/`.jsx` files): Joplin's
+/// `gui/` and Insomnia's `src/` have no entry file at all. This is the
+/// single code path both `convert` and `simulate` use
+/// (`detect_renderer`): the v2 scan and the v2 convert agreed on the
+/// same wrong picks (Joplin `packages/pdf-viewer`, Signal
+/// `sticker-creator/src`, Insomnia
+/// `examples/insomnia-plugin-sandbox-demo`) because they shared this
+/// function — there was no parallel heuristic to unify, only this
+/// function to fix.
+fn find_source_dir(
+    app_dir: &Path,
+    main_entry: Option<&str>,
+    preloads: &[String],
+) -> Option<String> {
+    for dir in SOURCE_DIRS {
+        let base = app_dir.join(dir);
+        if !base.is_dir() {
+            continue;
+        }
+        if !is_in_foreign_package(&base, app_dir, main_entry)
+            && dir_has_renderer_entry(app_dir, &base, main_entry, preloads, RENDERER_ENTRY_EXTS)
+        {
+            return Some(dir.to_string());
+        }
+        for sub in NESTED_SOURCE_DIRS {
+            let nested = base.join(sub);
+            if nested.is_dir()
+                && !is_in_foreign_package(&nested, app_dir, main_entry)
+                && dir_has_renderer_entry(
+                    app_dir,
+                    &nested,
+                    main_entry,
+                    preloads,
+                    RENDERER_ENTRY_EXTS,
+                )
+            {
+                return Some(dir.to_string());
+            }
+        }
+    }
+
+    // Recursive search (depth ≤ 3) for monorepo layouts the fixed sets
+    // above miss. A bare `index.html` inside a static-shell dir
+    // (`static/`, `public/`) resolves to its parent dir (Mailspring's
+    // `app/static/index.html` → `app/`).
+    let mut candidates: Vec<(bool, usize, usize, String)> = Vec::new();
+    for entry in WalkDir::new(app_dir)
+        .max_depth(3)
+        .into_iter()
+        .filter_entry(|e| {
+            if e.depth() == 0 {
+                return true;
+            }
+            if !e.file_type().is_dir() {
+                return true;
+            }
+            e.file_name()
+                .to_str()
+                .map(|n| !is_renderer_search_skip_dir(n))
+                .unwrap_or(false)
+        })
+        .flatten()
+    {
+        if !entry.file_type().is_dir() || entry.depth() == 0 {
+            continue;
+        }
+        let dir = entry.path();
+        if is_standalone_subpackage(dir) {
+            continue;
+        }
+        if is_in_foreign_package(dir, app_dir, main_entry) {
+            continue;
+        }
+        // Strict entry only: a barrel `index.ts` is a module entry,
+        // not a renderer entry (see `dir_has_renderer_entry`).
+        let has_stem = RENDERER_ENTRY_STEMS.iter().any(|stem| {
+            ["tsx", "jsx"]
+                .iter()
+                .any(|ext| dir.join(format!("{stem}.{ext}")).is_file())
+        });
+        let has_entry = dir_has_renderer_entry(app_dir, dir, main_entry, preloads, &["tsx", "jsx"]);
+        // Cheap density probe first (stops at 10); only dense or
+        // entry-bearing dirs pay for the accurate ranking count.
+        let tsx_probe = count_tsx_files(dir, DENSE_RENDERER_MIN_TSX, app_dir, main_entry);
+        if !has_entry && tsx_probe < DENSE_RENDERER_MIN_TSX {
+            continue;
+        }
+        let tsx = if tsx_probe >= DENSE_RENDERER_MIN_TSX {
+            count_tsx_files(dir, RENDERER_COUNT_CAP, app_dir, main_entry)
+        } else {
+            tsx_probe
+        };
+        let mut rel = dir
+            .strip_prefix(app_dir)
+            .unwrap_or(dir)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if !has_stem {
+            if let Some(name) = dir.file_name().and_then(|n| n.to_str()) {
+                if STATIC_SHELL_DIRS.contains(&name) {
+                    if let Some(parent) = dir.parent() {
+                        if let Ok(parent_rel) = parent.strip_prefix(app_dir) {
+                            let parent_rel = parent_rel.to_string_lossy().replace('\\', "/");
+                            if !parent_rel.is_empty() {
+                                rel = parent_rel;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        candidates.push((has_stem, tsx, entry.depth(), rel));
+    }
+    let candidates = collapse_renderer_containers(candidates);
+    let mut candidates = candidates;
+    candidates.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then(b.0.cmp(&a.0))
+            .then(a.2.cmp(&b.2))
+            .then(a.3.cmp(&b.3))
+    });
+    if let Some((_, _, _, rel)) = candidates.into_iter().next() {
+        return Some(rel);
+    }
+
+    // Dense-renderer fallback: a dir (depth ≤ 2) holding at least 10
+    // `.tsx`/`.jsx` files is renderer source even without an entry file
+    // (Signal's `ts/`). It must not be the main process's home (see
+    // `dir_contains_main_source`): VS Code's `src/` is dense with `.tsx`
+    // but holds `src/main.ts`, so it stays unmatched rather than being
+    // misreported as renderer source. Foreign packages are excluded
+    // here too (a sibling sub-app's dense dir is not the renderer).
+    let mut dense: Vec<(usize, usize, String)> = Vec::new();
+    for entry in WalkDir::new(app_dir)
+        .max_depth(2)
+        .into_iter()
+        .filter_entry(|e| {
+            if e.depth() == 0 {
+                return true;
+            }
+            if !e.file_type().is_dir() {
+                return true;
+            }
+            e.file_name()
+                .to_str()
+                .map(|n| !is_renderer_search_skip_dir(n))
+                .unwrap_or(false)
+        })
+        .flatten()
+    {
+        if !entry.file_type().is_dir() || entry.depth() == 0 {
+            continue;
+        }
+        let dir = entry.path();
+        if is_standalone_subpackage(dir) {
+            continue;
+        }
+        if is_in_foreign_package(dir, app_dir, main_entry) {
+            continue;
+        }
+        if dir_contains_main_source(dir, main_entry) {
+            continue;
+        }
+        let count = count_tsx_files(dir, DENSE_RENDERER_MIN_TSX, app_dir, main_entry);
+        if count >= DENSE_RENDERER_MIN_TSX {
+            let rel = dir
+                .strip_prefix(app_dir)
+                .unwrap_or(dir)
+                .to_string_lossy()
+                .replace('\\', "/");
+            dense.push((count, entry.depth(), rel));
+        }
+    }
+    dense.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+    dense.into_iter().next().map(|(_, _, rel)| rel)
 }
 
 /// Whether a root-level script imports Electron — main-process code that
@@ -2570,6 +3138,9 @@ fn detect_bundler(pkg: &serde_json::Value) -> Option<Bundler> {
     if names.contains(&"electron-vite") || script_text.contains("electron-vite") {
         return Some(Bundler::ElectronVite);
     }
+    if names.contains(&"rolldown") || words.contains(&"rolldown") {
+        return Some(Bundler::Rolldown);
+    }
     if names.contains(&"vite") || words.contains(&"vite") {
         return Some(Bundler::Vite);
     }
@@ -2591,25 +3162,109 @@ fn detect_bundler(pkg: &serde_json::Value) -> Option<Bundler> {
     None
 }
 
-/// Detect the frontend dev server from the `dev` script. A script that
-/// just launches Electron is not a dev server.
+/// Script names that can run a frontend dev server, in priority order.
+/// Monorepos name the Vite script `start:dev-server` (Insomnia) rather
+/// than `dev`; `start`/`serve` only count when the command itself names
+/// a dev server (the keyword check in [`find_dev_script`] decides).
+const DEV_SCRIPT_NAMES: &[&str] = &["dev", "start:dev-server", "dev:server", "start", "serve"];
+
+/// Find a dev-server script in one `package.json`'s scripts object: the
+/// first name in [`DEV_SCRIPT_NAMES`] whose command contains a
+/// [`DEV_SERVER_KEYWORDS`] entry. A script that just launches Electron
+/// (`electron .`, `electron ./app --dev`) is not a dev server.
+fn find_dev_script(scripts: &serde_json::Value) -> Option<(&str, String)> {
+    let scripts = scripts.as_object()?;
+    for name in DEV_SCRIPT_NAMES {
+        if let Some(cmd) = scripts.get(*name).and_then(|v| v.as_str()) {
+            let lower = cmd.to_lowercase();
+            if DEV_SERVER_KEYWORDS.iter().any(|k| lower.contains(k)) {
+                return Some((name, cmd.to_string()));
+            }
+        }
+    }
+    None
+}
+
+/// Directories under `app_dir` (depth ≤ `max_depth`, root excluded)
+/// that contain a `package.json` — the workspace packages of a
+/// monorepo. `node_modules`, `.git` and build-output dirs are never
+/// descended into.
+fn collect_package_dirs(app_dir: &Path, max_depth: usize) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let walker = WalkDir::new(app_dir)
+        .max_depth(max_depth + 1)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| {
+            // Never descend into dependency, VCS, build-output or
+            // hidden directories (pruned, not just skipped).
+            if e.depth() == 0 {
+                return true;
+            }
+            let name = e.file_name().to_string_lossy();
+            !(name == "node_modules"
+                || name == ".git"
+                || name == "dist"
+                || name == "build"
+                || name == "out"
+                || name.starts_with('.'))
+        });
+    for entry in walker.filter_map(Result::ok) {
+        let path = entry.path();
+        if !entry.file_type().is_dir() || entry.depth() == 0 {
+            continue;
+        }
+        if path.join("package.json").is_file() {
+            out.push(path.to_path_buf());
+        }
+    }
+    out
+}
+
+/// Detect the frontend dev server from the `dev` script — the root
+/// package first, then workspace packages (N10). A script that just
+/// launches Electron is not a dev server.
 ///
 /// Port priority: `--port` in the dev script (it overrides config at
 /// runtime) → the Vite config's `server.port` → the bundler's default
 /// port → the Tauri default 1420, flagged as a fallback.
 fn detect_dev_server(app_dir: &Path, pkg: &serde_json::Value) -> Option<DevServer> {
-    let script = pkg.get("scripts")?.get("dev")?.as_str()?;
-    let lower = script.to_lowercase();
-    if !DEV_SERVER_KEYWORDS.iter().any(|k| lower.contains(k)) {
-        return None;
+    if let Some(scripts) = pkg.get("scripts") {
+        if let Some((_name, script)) = find_dev_script(scripts) {
+            return Some(dev_server_from_script(app_dir, pkg, &script));
+        }
     }
-    let port_re = Regex::new(r"--port[= ](\d{2,5})").ok()?;
+    // Workspace packages (Insomnia: the root has no dev script; the
+    // real one is `packages/insomnia`'s `start:dev-server` running
+    // `vite dev`). Deterministic order; depth ≤ 4.
+    let mut dirs = collect_package_dirs(app_dir, 4);
+    dirs.sort();
+    for dir in dirs {
+        let Some(ws_pkg) = read_package_json_value(&dir) else {
+            continue;
+        };
+        let Some(scripts) = ws_pkg.get("scripts") else {
+            continue;
+        };
+        if let Some((_name, script)) = find_dev_script(scripts) {
+            return Some(dev_server_from_script(&dir, &ws_pkg, &script));
+        }
+    }
+    None
+}
+
+/// Build a [`DevServer`] from one script command in one package
+/// directory: port from `--port` in the script, else the Vite config
+/// in that package's directory, else the bundler default, else 1420.
+fn dev_server_from_script(pkg_dir: &Path, pkg: &serde_json::Value, script: &str) -> DevServer {
+    let port_re = Regex::new(r"--port[= ](\d{2,5})").ok();
     let mut port: Option<(u16, String)> = port_re
-        .captures(script)
+        .as_ref()
+        .and_then(|re| re.captures(script))
         .and_then(|c| c[1].parse().ok())
         .map(|p| (p, "the dev script (`--port`)".to_string()));
     if port.is_none() {
-        if let Some((name, config)) = read_vite_config(app_dir) {
+        if let Some((name, config)) = read_vite_config(pkg_dir) {
             if let Some(p) = vite_config_port(&config) {
                 port = Some((p, format!("`{name}`")));
             }
@@ -2631,12 +3286,12 @@ fn detect_dev_server(app_dir: &Path, pkg: &serde_json::Value) -> Option<DevServe
             true,
         ),
     };
-    Some(DevServer {
+    DevServer {
         url: format!("http://localhost:{port}"),
         port_fallback,
         port_source,
         script: script.to_string(),
-    })
+    }
 }
 
 /// The Vite config file's name and contents, if one exists at the app root.
@@ -3106,6 +3761,7 @@ mod tests {
             classification: Classification::Auto,
             tauri_target: None,
             note: String::new(),
+            remote_mediated: false,
             occurrences: 1,
         }
     }
@@ -3430,11 +4086,13 @@ mod tests {
             preload: crate::model::PreloadInfo::default(),
             native_modules: Vec::new(),
             port_needing_deps: Vec::new(),
+            build_tooling: Vec::new(),
             dev_url: None,
             feasibility_score: 100,
             verdict: "Good fit — mostly automatic".to_string(),
             windows: Vec::new(),
             menu: None,
+            menus: Vec::new(),
         }
     }
 
@@ -3607,6 +4265,45 @@ mod tests {
     fn electron_dev_script_is_not_a_dev_server() {
         let app = fresh_test_dir("port-electron");
         let pkg = pkg_json(r#"{"scripts":{"dev":"electron ."}}"#).unwrap();
+        assert!(detect_dev_server(&app, &pkg).is_none());
+        fs::remove_dir_all(&app).ok();
+    }
+
+    #[test]
+    fn dev_server_is_found_in_a_workspace_package() {
+        // Insomnia shape: the root package has no dev script; the real
+        // one is `packages/insomnia`'s `start:dev-server` running
+        // `vite dev` (port 3334 from its Vite config).
+        let app = fresh_test_dir("port-workspace");
+        write_test_file(
+            &app,
+            "packages/insomnia/package.json",
+            r#"{"name":"insomnia","scripts":{"start:dev-server":"vite dev"},"devDependencies":{"vite":"^5.0.0"}}"#,
+        );
+        write_test_file(
+            &app,
+            "packages/insomnia/vite.config.ts",
+            "export default { server: { port: 3334 } }",
+        );
+        let pkg = pkg_json(r#"{"name":"root","scripts":{"start":"electron ."}}"#).unwrap();
+        let dev = detect_dev_server(&app, &pkg).expect("workspace dev server");
+        assert_eq!(dev.url, "http://localhost:3334");
+        assert!(dev.port_source.contains("vite.config.ts"));
+        assert_eq!(dev.script, "vite dev");
+        fs::remove_dir_all(&app).ok();
+    }
+
+    #[test]
+    fn electron_only_start_script_in_workspace_is_not_a_dev_server() {
+        // Joplin shape: `packages/app-desktop`'s `start` launches
+        // Electron, and the root has no dev script — no dev server.
+        let app = fresh_test_dir("port-joplin");
+        write_test_file(
+            &app,
+            "packages/app-desktop/package.json",
+            r#"{"name":"app-desktop","scripts":{"start":"gulp before-start && electron . --env dev"}}"#,
+        );
+        let pkg = pkg_json(r#"{"name":"root","scripts":{}}"#).unwrap();
         assert!(detect_dev_server(&app, &pkg).is_none());
         fs::remove_dir_all(&app).ok();
     }
@@ -4084,5 +4781,356 @@ mod tests {
         assert!(bridge.contains("appStateUpdate:"));
         fs::remove_dir_all(&app).ok();
         fs::remove_dir_all(&out).ok();
+    }
+
+    // ---- Proof-campaign fix round: renderer detection ----------------
+
+    #[test]
+    fn renderer_detection_finds_joplin_layout() {
+        // Joplin: the renderer lives in packages/app-desktop/ with its
+        // index.html at the package root and the UI in gui/.
+        let app = fresh_test_dir("renderer-joplin");
+        write_test_file(
+            &app,
+            "package.json",
+            r#"{"name":"joplin","main":"packages/app-desktop/main.js","version":"3.0.0"}"#,
+        );
+        write_test_file(
+            &app,
+            "packages/app-desktop/index.html",
+            "<!doctype html><html><body></body></html>\n",
+        );
+        write_test_file(
+            &app,
+            "packages/app-desktop/gui/MainScreen.tsx",
+            "export function MainScreen() { return null; }\n",
+        );
+        write_test_file(
+            &app,
+            "packages/app-desktop/main.js",
+            "const { app } = require('electron');\n",
+        );
+        let pkg = read_package_json_value(&app);
+        let mut report = test_report();
+        report.main_entry = Some("packages/app-desktop/main.js".to_string());
+        let plan = detect_renderer(&app, &pkg, &report);
+        assert_eq!(plan.source_dir.as_deref(), Some("packages/app-desktop"));
+        assert!(matches!(plan.kind, RendererKind::Source));
+        fs::remove_dir_all(&app).ok();
+    }
+
+    #[test]
+    fn renderer_detection_finds_github_desktop_layout() {
+        // GitHub Desktop: the renderer is app/src/ui/ (app.tsx); the
+        // only index.html is the static shell app/static/index.html,
+        // which must resolve to app/ — and must lose to the real entry.
+        let app = fresh_test_dir("renderer-ghdesktop");
+        write_test_file(
+            &app,
+            "package.json",
+            r#"{"name":"github-desktop","main":"app/main.js","version":"3.0.0"}"#,
+        );
+        write_test_file(
+            &app,
+            "app/src/ui/app.tsx",
+            "import React from 'react';\nexport function App() { return null; }\n",
+        );
+        write_test_file(
+            &app,
+            "app/static/index.html",
+            "<!doctype html><html><body></body></html>\n",
+        );
+        write_test_file(
+            &app,
+            "app/src/main-process/main.ts",
+            "import { app } from 'electron';\n",
+        );
+        let pkg = read_package_json_value(&app);
+        let mut report = test_report();
+        report.main_entry = Some("app/main.js".to_string());
+        let plan = detect_renderer(&app, &pkg, &report);
+        assert_eq!(plan.source_dir.as_deref(), Some("app/src/ui"));
+        assert!(matches!(plan.kind, RendererKind::Source));
+        fs::remove_dir_all(&app).ok();
+    }
+
+    #[test]
+    fn renderer_detection_finds_signal_ts_layout() {
+        // Signal: the renderer is ts/ — no entry file, just a dense
+        // tree of .tsx files (the main process lives elsewhere).
+        let app = fresh_test_dir("renderer-signal");
+        write_test_file(
+            &app,
+            "package.json",
+            r#"{"name":"signal","main":"app/main.main.ts","version":"7.0.0"}"#,
+        );
+        for name in ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"] {
+            write_test_file(
+                &app,
+                &format!("ts/{name}.tsx"),
+                "export function Component() { return null; }\n",
+            );
+        }
+        write_test_file(
+            &app,
+            "ts/main/preload.ts",
+            "import { contextBridge } from 'electron';\n",
+        );
+        let pkg = read_package_json_value(&app);
+        let mut report = test_report();
+        report.main_entry = Some("app/main.main.ts".to_string());
+        let plan = detect_renderer(&app, &pkg, &report);
+        assert_eq!(plan.source_dir.as_deref(), Some("ts"));
+        assert!(matches!(plan.kind, RendererKind::Source));
+        fs::remove_dir_all(&app).ok();
+    }
+
+    #[test]
+    fn renderer_detection_excludes_decoy_sub_apps() {
+        // Campaign regression (2026-11-25): the v2 scan/convert copied
+        // the WRONG renderer for 3/5 apps — Joplin `packages/pdf-viewer`
+        // (a sibling sub-package with its own `main`), Signal
+        // `sticker-creator/src` (a mini-app inside a standalone package
+        // with no `main`), Insomnia
+        // `examples/insomnia-plugin-sandbox-demo` (an examples dir) —
+        // while the real renderer (Joplin's `packages/app-desktop/gui/`,
+        // 154 of the package's 158 `.tsx` files, no entry file at all)
+        // went unpicked. All three decoy shapes are here at once; the
+        // real renderer is dense but entry-less.
+        let app = fresh_test_dir("renderer-decoys");
+        write_test_file(
+            &app,
+            "package.json",
+            r#"{"name":"decoys","private":true,"version":"1.0.0"}"#,
+        );
+        // The app package: main entry + electron dep.
+        write_test_file(
+            &app,
+            "packages/app-desktop/package.json",
+            r#"{"name":"@test/app-desktop","main":"main.js","version":"1.0.0","dependencies":{"electron":"^43.0.0"}}"#,
+        );
+        write_test_file(
+            &app,
+            "packages/app-desktop/main.js",
+            "const { app, BrowserWindow } = require('electron');\n",
+        );
+        // The real renderer: 12 `.tsx` files under gui/, 1 plugin
+        // webview outside it (12/13 = 92% — above the collapse bar,
+        // mirroring Joplin's 154/158).
+        for i in 0..12 {
+            write_test_file(
+                &app,
+                &format!("packages/app-desktop/gui/Screen{i}.tsx"),
+                "export function Screen() { return null; }\n",
+            );
+        }
+        write_test_file(
+            &app,
+            "packages/app-desktop/plugins/UserWebview.tsx",
+            "export function UserWebview() { return null; }\n",
+        );
+        // Decoy 1: sibling sub-package WITH a main field and a strict
+        // entry file (index.tsx) — the old code ranked it first.
+        write_test_file(
+            &app,
+            "packages/pdf-viewer/package.json",
+            r#"{"name":"@test/pdf-viewer","main":"dist/main.js","version":"1.0.0"}"#,
+        );
+        write_test_file(
+            &app,
+            "packages/pdf-viewer/index.tsx",
+            "export function PdfViewer() { return null; }\n",
+        );
+        write_test_file(
+            &app,
+            "packages/pdf-viewer/Viewer.tsx",
+            "export function Viewer() { return null; }\n",
+        );
+        // Decoy 2: a mini-app inside a standalone package (no main) —
+        // its src/ has strict entries but no package.json of its own.
+        write_test_file(
+            &app,
+            "sticker-creator/package.json",
+            r#"{"name":"sticker-creator","version":"1.0.0"}"#,
+        );
+        write_test_file(
+            &app,
+            "sticker-creator/src/App.tsx",
+            "export function App() { return null; }\n",
+        );
+        write_test_file(
+            &app,
+            "sticker-creator/src/main.tsx",
+            "export function main() {}\n",
+        );
+        // Decoy 3: an examples dir with an index.html and a strict entry.
+        write_test_file(
+            &app,
+            "examples/plugin-demo/package.json",
+            r#"{"name":"plugin-demo","main":"index.js","version":"1.0.0"}"#,
+        );
+        write_test_file(
+            &app,
+            "examples/plugin-demo/index.html",
+            "<!doctype html><html><body></body></html>\n",
+        );
+        write_test_file(
+            &app,
+            "examples/plugin-demo/App.tsx",
+            "export function App() { return null; }\n",
+        );
+        let pkg = read_package_json_value(&app);
+        let mut report = test_report();
+        report.main_entry = Some("packages/app-desktop/main.js".to_string());
+        let plan = detect_renderer(&app, &pkg, &report);
+        assert_eq!(
+            plan.source_dir.as_deref(),
+            Some("packages/app-desktop/gui"),
+            "decoy sub-apps must lose to the real renderer"
+        );
+        assert!(matches!(plan.kind, RendererKind::Source));
+        fs::remove_dir_all(&app).ok();
+    }
+
+    #[test]
+    fn renderer_detection_keeps_internal_packages_of_the_app_package() {
+        // Mailspring shape (2026-11-25): the app's own plugin UI lives
+        // in `internal_packages/*` — 53 sub-packages, each with its own
+        // `package.json` AND a `main` field — nested INSIDE the app
+        // package. They are the shipped UI, not sibling sub-apps: the
+        // first version of the foreign-package rule excluded them and
+        // narrowed Mailspring's renderer from `app/` to `app/src/`,
+        // dropping 215 touch points. A sibling package outside the app
+        // package (here `packages/pdf-viewer`) must still lose.
+        let app = fresh_test_dir("renderer-internal-pkgs");
+        write_test_file(
+            &app,
+            "package.json",
+            r#"{"name":"t","main":"app/src/browser/main.js","version":"1.0.0"}"#,
+        );
+        write_test_file(
+            &app,
+            "app/package.json",
+            r#"{"name":"app","main":"./src/browser/main.js","version":"1.0.0"}"#,
+        );
+        write_test_file(
+            &app,
+            "app/src/browser/main.js",
+            "const { app, BrowserWindow } = require('electron');\n",
+        );
+        for i in 0..12 {
+            write_test_file(
+                &app,
+                &format!("app/src/Screen{i}.tsx"),
+                "export function Screen() { return null; }\n",
+            );
+        }
+        for pkg in ["account-sidebar", "activity"] {
+            write_test_file(
+                &app,
+                &format!("app/internal_packages/{pkg}/package.json"),
+                &format!(r#"{{"name":"{pkg}","main":"./lib/main","version":"1.0.0"}}"#),
+            );
+            // Ten files each, one level DEEPER than the old fixture
+            // (`lib/deep/` — file depth 5 from `app/`): the density
+            // count must not stop at depth 4, or `app/` undercounts
+            // (12) while `internal_packages/` counts all 20 and the
+            // container collapse wrongly drops `app/` (the real
+            // Mailspring bug: 269 vs 260 counted, 464 vs 308 true).
+            for i in 0..10 {
+                write_test_file(
+                    &app,
+                    &format!("app/internal_packages/{pkg}/lib/deep/Panel{i}.tsx"),
+                    "export function Panel() { return null; }\n",
+                );
+            }
+        }
+        // Decoy: a sibling package outside the app package.
+        write_test_file(
+            &app,
+            "packages/pdf-viewer/package.json",
+            r#"{"name":"pdf-viewer","main":"dist/main.js","version":"1.0.0"}"#,
+        );
+        write_test_file(
+            &app,
+            "packages/pdf-viewer/index.tsx",
+            "export function PdfViewer() { return null; }\n",
+        );
+        let pkg = read_package_json_value(&app);
+        let mut report = test_report();
+        report.main_entry = Some("app/src/browser/main.js".to_string());
+        let plan = detect_renderer(&app, &pkg, &report);
+        assert_eq!(
+            plan.source_dir.as_deref(),
+            Some("app"),
+            "the whole app package — including its internal plugin packages — is the renderer"
+        );
+        assert!(matches!(plan.kind, RendererKind::Source));
+        fs::remove_dir_all(&app).ok();
+    }
+
+    #[test]
+    fn renderer_detection_excludes_main_entry_from_renderer() {
+        // VS Code shape: src/main.ts IS the main process (it imports
+        // Electron and the package main is ./out/main.js). The old
+        // stem match reported all of src/ (16,131 files) as renderer
+        // source. The fix reports no renderer rather than a wrong one.
+        let app = fresh_test_dir("renderer-vscode");
+        write_test_file(
+            &app,
+            "package.json",
+            r#"{"name":"vscode","main":"./out/main.js","version":"1.0.0"}"#,
+        );
+        write_test_file(
+            &app,
+            "src/main.ts",
+            "import { app } from 'electron';\nexport function main() {}\n",
+        );
+        write_test_file(
+            &app,
+            "src/vs/code/electron-main/main.ts",
+            "import { app } from 'electron';\n",
+        );
+        write_test_file(&app, "src/vs/workbench/workbench.ts", "export {};\n");
+        let pkg = read_package_json_value(&app);
+        let mut report = test_report();
+        report.main_entry = Some("./out/main.js".to_string());
+        let plan = detect_renderer(&app, &pkg, &report);
+        assert_eq!(
+            plan.source_dir, None,
+            "src/ must not be reported as renderer source"
+        );
+        assert!(matches!(plan.kind, RendererKind::Placeholder));
+        fs::remove_dir_all(&app).ok();
+    }
+
+    #[test]
+    fn bundler_detection_ignores_vite_substring_and_finds_rolldown() {
+        // VS Code's scripts mention build/vite paths (component-explorer
+        // install scripts) while the workbench builds with gulp/esbuild:
+        // a substring hit reported "vite" for it.
+        let vite_path = pkg_json(
+            r#"{"name":"t","scripts":{"build":"node build/vite/install.mjs","postinstall":"node build/vite/download.mjs"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            detect_bundler(&vite_path),
+            None,
+            "a build/vite *path* is not the vite bundler"
+        );
+        // Real vite still detects (dep or whole-word script token).
+        let real_vite = pkg_json(
+            r#"{"name":"t","devDependencies":{"vite":"^5.0.0"},"scripts":{"build":"vite build"}}"#,
+        )
+        .unwrap();
+        assert_eq!(detect_bundler(&real_vite), Some(Bundler::Vite));
+        // Signal's bundler: rolldown, by dep or by script token.
+        let rolldown_dep =
+            pkg_json(r#"{"name":"t","devDependencies":{"rolldown":"^1.0.0"}}"#).unwrap();
+        assert_eq!(detect_bundler(&rolldown_dep), Some(Bundler::Rolldown));
+        let rolldown_script =
+            pkg_json(r#"{"name":"t","scripts":{"build":"rolldown -c rolldown.config.ts"}}"#)
+                .unwrap();
+        assert_eq!(detect_bundler(&rolldown_script), Some(Bundler::Rolldown));
     }
 }

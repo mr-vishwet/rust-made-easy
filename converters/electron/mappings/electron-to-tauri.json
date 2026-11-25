@@ -334,5 +334,341 @@
     "plugin": null,
     "status": "manual",
     "tauri_target": "rusqlite"
+  },
+  {
+    "electron_api": "app.commandLine",
+    "notes": "Chromium command-line switches have no Tauri equivalent; each switch needs a per-app decision (drop it, or pass it to the webview where the webview supports it).",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": null
+  },
+  {
+    "electron_api": "app.dock",
+    "notes": "The macOS dock API (setMenu, bounce, show/hide) has no Tauri core equivalent; needs platform Rust code.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": null
+  },
+  {
+    "electron_api": "app.setBadgeCount",
+    "notes": "Dock/taskbar badge counts have no Tauri core equivalent; needs platform Rust code.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": null
+  },
+  {
+    "electron_api": "app.setAppUserModelId",
+    "notes": "The Windows AppUserModelID has no Tauri core equivalent; set it from Rust platform code or the Windows app manifest.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": null
+  },
+  {
+    "electron_api": "app.setJumpList",
+    "notes": "Windows jump lists have no Tauri core equivalent; needs platform Rust code.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": null
+  },
+  {
+    "electron_api": "app.enableSandbox",
+    "notes": "Enabling Chromium's sandbox has no Tauri equivalent — Tauri webviews are sandboxed by the platform webview, so the call is usually droppable, but verify per app.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": null
+  },
+  {
+    "electron_api": "app.isPackaged",
+    "notes": "The packaged-vs-dev check has no Tauri equivalent; use the Tauri dev/release build distinction (tauri::is_dev() / cfg(debug_assertions)) instead.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": null
+  },
+  {
+    "electron_api": "app.runningUnderARM",
+    "notes": "The ARM-translation check has no Tauri equivalent; use std::env::consts::ARCH in Rust instead.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": null
+  },
+  {
+    "electron_api": "app.setLoginItemSettings",
+    "notes": "Login-item (start at login) settings have no Tauri core equivalent; needs platform Rust code or the tauri-plugin-autostart plugin.",
+    "plugin": "tauri-plugin-autostart",
+    "status": "manual",
+    "tauri_target": "tauri-plugin-autostart"
+  },
+  {
+    "electron_api": "app.getLoginItemSettings",
+    "notes": "Reading login-item settings has no Tauri core equivalent; use the tauri-plugin-autostart plugin's query API.",
+    "plugin": "tauri-plugin-autostart",
+    "status": "manual",
+    "tauri_target": "tauri-plugin-autostart"
+  },
+  {
+    "electron_api": "app.setName",
+    "notes": "Renaming the app at runtime has no Tauri equivalent; the app name comes from tauri.conf.json instead.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": null
+  },
+  {
+    "electron_api": "app.setPath",
+    "notes": "Redirecting a standard path (e.g. userData) has no Tauri equivalent; the path API does not support overriding the app-data directory.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": null
+  },
+  {
+    "electron_api": "app.moveToApplicationsFolder",
+    "notes": "Moving the app into /Applications (macOS) has no Tauri equivalent; needs platform Rust code.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": null
+  },
+  {
+    "electron_api": "app.isInApplicationsFolder",
+    "notes": "Checking whether the app lives in /Applications (macOS) has no Tauri equivalent; needs platform Rust code.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": null
+  },
+  {
+    "electron_api": "app.disableHardwareAcceleration",
+    "notes": "Disabling Chromium hardware acceleration has no Tauri equivalent; the system webview manages its own rendering.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": null
+  },
+  {
+    "electron_api": "app.getPreferredSystemLanguages",
+    "notes": "Preferred system languages have no Tauri core equivalent; read the OS locale from Rust instead.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": null
+  },
+  {
+    "electron_api": "app.setDesktopName",
+    "notes": "The Linux desktop-file name has no Tauri equivalent; it comes from the bundle metadata instead.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": null
+  },
+  {
+    "electron_api": "app.setAppLogsPath",
+    "notes": "Redirecting the app-logs path has no Tauri equivalent; point the logger at the path directly instead.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": null
+  },
+  {
+    "electron_api": "app.isDefaultProtocolClient",
+    "notes": "Querying the default protocol handler maps to the deep-link plugin alongside registration; the open-url handling still needs porting.",
+    "plugin": "tauri-plugin-deep-link",
+    "status": "auto",
+    "tauri_target": "tauri-plugin-deep-link"
+  },
+  {
+    "electron_api": "app.removeAsDefaultProtocolClient",
+    "notes": "Removing a protocol registration maps to the deep-link plugin alongside registration.",
+    "plugin": "tauri-plugin-deep-link",
+    "status": "auto",
+    "tauri_target": "tauri-plugin-deep-link"
+  },
+  {
+    "electron_api": "net.resolveHost",
+    "notes": "DNS resolution is not HTTP: reqwest cannot do it. Use a DNS resolver crate (e.g. hickory-resolver) or std::net::ToSocketAddrs.",
+    "plugin": null,
+    "status": "assisted",
+    "tauri_target": "DNS resolver crate (e.g. hickory-resolver)"
+  },
+  {
+    "electron_api": "net.isOnline",
+    "notes": "The connectivity check is not an HTTP request: reqwest is the wrong shape. Use a connectivity check (e.g. a DNS probe or the online crate).",
+    "plugin": null,
+    "status": "assisted",
+    "tauri_target": "connectivity check (DNS probe / online crate)"
+  },
+  {
+    "electron_api": "net.fetch",
+    "notes": "Electron's net.fetch maps to reqwest in Rust, but the streaming API differs.",
+    "plugin": null,
+    "status": "assisted",
+    "tauri_target": "reqwest"
+  },
+  {
+    "electron_api": "net.request",
+    "notes": "Electron's net.request maps to reqwest in Rust, but the streaming API differs.",
+    "plugin": null,
+    "status": "assisted",
+    "tauri_target": "reqwest"
+  },
+  {
+    "electron_api": "WebContentsView",
+    "notes": "Embedding a webview inside a window has no Tauri equivalent; it is a redesign (separate WebviewWindow or a webview tag replacement).",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": null
+  },
+  {
+    "electron_api": "webview",
+    "notes": "The <webview> tag (and the webviewTag webPreference) embeds a guest page inside a window; Tauri has no webview tag — it is a redesign (a separate WebviewWindow, or the guest content served as a route in the same webview).",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": null
+  },
+  {
+    "electron_api": "utilityProcess",
+    "notes": "Utility processes have no Tauri equivalent; use a Rust sidecar (tauri-plugin-shell sidecar) instead.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": "Rust sidecar (tauri-plugin-shell)"
+  },
+  {
+    "electron_api": "MessageChannelMain",
+    "notes": "MessagePort plumbing between main and renderer has no Tauri equivalent; replace with Tauri events/commands.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": null
+  },
+  {
+    "electron_api": "desktopCapturer",
+    "notes": "Screen/window capture-source enumeration has no Tauri equivalent; needs a platform plugin (screen capture).",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": null
+  },
+  {
+    "electron_api": "systemPreferences",
+    "notes": "OS preferences (macOS defaults, media-access status, accent color, notification subscriptions) have no Tauri equivalent; needs platform Rust code.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": null
+  },
+  {
+    "electron_api": "webFrame",
+    "notes": "Renderer-frame controls (zoom level, spell-checker provider) map to the Tauri webview API, but not one-to-one; check the call site.",
+    "plugin": null,
+    "status": "assisted",
+    "tauri_target": "tauri webview API"
+  },
+  {
+    "electron_api": "webUtils",
+    "notes": "File-drop path resolution has no direct Tauri equivalent; Tauri drag-drop events carry file paths instead.",
+    "plugin": null,
+    "status": "assisted",
+    "tauri_target": "Tauri drag-drop events (file paths)"
+  },
+  {
+    "electron_api": "contentTracing",
+    "notes": "Chromium tracing (startRecording/stopRecording, heap profiling) has no Tauri equivalent.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": null
+  },
+  {
+    "electron_api": "ipcMain.handleOnce",
+    "notes": "Each one-shot handler becomes a Tauri command registered with invoke_handler, like ipcMain.handle.",
+    "plugin": null,
+    "status": "auto",
+    "tauri_target": "#[tauri::command]"
+  },
+  {
+    "electron_api": "getGlobal",
+    "notes": "Remote-only: reading a main-process global from the renderer has no Tauri equivalent; expose the value through an invoke() + Rust command instead.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": null
+  },
+  {
+    "electron_api": "getCurrentWindow",
+    "notes": "Remote-only: the current BrowserWindow from the renderer has no Tauri equivalent; use the Tauri window API in the webview instead.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": null
+  },
+  {
+    "electron_api": "getCurrentWebContents",
+    "notes": "Remote-only: the current WebContents from the renderer has no Tauri equivalent; use the Tauri webview API instead.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": null
+  },
+  {
+    "electron_api": "Menu.setApplicationMenu",
+    "notes": "Setting the application menu maps to the Tauri menu API (app.set_menu()); platform conventions need a human look.",
+    "plugin": null,
+    "status": "assisted",
+    "tauri_target": "tauri menu API (app.set_menu())"
+  },
+  {
+    "electron_api": "screen.screenToDipPoint",
+    "notes": "DIP conversion needs manual math from the monitor's scaleFactor; the monitor API gives the scale factor but not the conversion.",
+    "plugin": null,
+    "status": "assisted",
+    "tauri_target": "tauri window / monitor API (scaleFactor + manual DIP math)"
+  },
+  {
+    "electron_api": "screen.screenToDipRect",
+    "notes": "DIP conversion needs manual math from the monitor's scaleFactor; the monitor API gives the scale factor but not the conversion.",
+    "plugin": null,
+    "status": "assisted",
+    "tauri_target": "tauri window / monitor API (scaleFactor + manual DIP math)"
+  },
+  {
+    "electron_api": "webContents.forcefullyCrashRenderer",
+    "notes": "Forcing a renderer crash has no Tauri equivalent.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": null
+  },
+  {
+    "electron_api": "webContents.isCrashed",
+    "notes": "Checking whether the renderer crashed has no Tauri equivalent; the webview's lifecycle events are the closest signal.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": null
+  },
+  {
+    "electron_api": "keytar",
+    "notes": "Native keychain bindings become keyring-crate calls behind Tauri commands.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": "keyring crate"
+  },
+  {
+    "electron_api": "sqlite-vec",
+    "notes": "The sqlite-vec vector-search extension becomes rusqlite with the sqlite-vec extension loaded.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": "rusqlite + sqlite-vec extension"
+  },
+  {
+    "electron_api": "@signalapp/sqlcipher",
+    "notes": "Signal's SQLCipher addon becomes rusqlite with SQLCipher (or sqlx with the sqlcipher feature) behind Tauri commands.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": "rusqlite + SQLCipher"
+  },
+  {
+    "electron_api": "fs-admin",
+    "notes": "Privileged file operations (admin elevation) have no Tauri equivalent; needs a Rust port with platform elevation.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": null
+  },
+  {
+    "electron_api": "registry-js",
+    "notes": "Windows registry access becomes the winreg crate behind Tauri commands.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": "winreg crate"
+  },
+  {
+    "electron_api": "node-llama-cpp",
+    "notes": "llama.cpp bindings are a native addon (model loading, GPU/CPU inference); needs a Rust port (e.g. llama.cpp bindings or a sidecar).",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": null
   }
 ]
