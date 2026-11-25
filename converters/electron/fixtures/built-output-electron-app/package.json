@@ -1,0 +1,1 @@
+{"description":"Electron app fixture with a real renderer build output for electron-to-rust golden tests","devDependencies":{"electron":"^30.0.0","vite":"^5.0.0"},"main":"main.js","name":"built-output-electron-app","scripts":{"build":"vite build","dev":"vite","start":"electron ."},"version":"1.0.0"}

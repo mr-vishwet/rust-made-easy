@@ -1,0 +1,11 @@
+{
+    "_comment": "e2r MCP server \u2014 Claude Code config. Copy this whole file to .mcp.json in your project root (project scope) or merge the \"e2r\" entry into ~/.claude.json (user scope). Restart Claude Code after adding it. \"e2r\" must resolve on PATH (cargo install --path converters/electron/crates/e2r-cli); if it doesn't, replace \"e2r\" with the absolute path to the cargo-installed binary, usually ~/.cargo/bin/e2r.",
+    "mcpServers": {
+        "e2r": {
+            "args": [
+                "serve"
+            ],
+            "command": "e2r"
+        }
+    }
+}

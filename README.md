@@ -13,9 +13,11 @@ a thousand steps: the same Migration Brain will convert Android apps and more �
 eventually, in Rust.
 
 > **Status:** early. Phase 1 (Electron → Rust, `e2r`) ships as a working v0.1 CLI:
-> `scan` + `convert` for common Electron apps. The rest of the vision — the simulator,
-> the MCP server, the companion window — is designed in [PRD.md](PRD.md) and
-> [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) and lands phase by phase.
+> `scan` + `convert` for common Electron apps, plus the pre-migration
+> simulator (`simulate` + `calibrate`) and the MCP server (`e2r serve`) with
+> the agent skill. The rest of the vision — the companion window — is designed
+> in [PRD.md](PRD.md) and [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) and
+> lands phase by phase.
 
 ## How it works
 
@@ -51,7 +53,7 @@ knowledge. Full vision: [PRD.md](PRD.md).
 
 | # | Converter | Status | Command |
 | --- | --- | --- | --- |
-| 1 | [Electron → Rust](converters/electron/) — `electron-to-rust` | **v0.1 shipped** | `e2r scan` / `e2r convert` |
+| 1 | [Electron → Rust](converters/electron/) — `electron-to-rust` | **v0.1 shipped** | `e2r scan` / `e2r simulate` / `e2r convert` / `e2r calibrate` / `e2r serve` |
 | 2 | Android → Rust | Planned | — |
 
 Each converter is a module under [`converters/`](converters/) with its own crates,
@@ -84,6 +86,92 @@ feasibility score, and each API classified AUTO (converts mechanically), ASSISTE
 
 Full converter docs, coverage table, and FAQ:
 [converters/electron/README.md](converters/electron/README.md).
+
+## The pre-migration simulator
+
+Before converting anything, `e2r simulate` predicts the migration's shape and
+payoff: the migratable breakdown, the UI preservation estimate, predicted gains
+with confidence ranges, warnings, and an effort hint. Predictions are ranges with
+confidence levels, never single numbers — and the model is research-backed
+([docs/RND.md](docs/RND.md) §11): bundle size from measured e2r-generated Tauri
+binaries (11.4 MB zero-plugin floor, ~2 MB per plugin), memory per platform
+(macOS −40%, Windows ~0%, Linux refused as unmeasured), startup as no improvement
+(point exactly 1.0 — the published measurements disagree on which framework is
+faster), and CPU refused outright. After the migration, `e2r calibrate` compares
+the predictions against measured actuals and feeds the discrepancies back into
+the model's confidence intervals.
+
+```sh
+# Predict the migration before any code changes
+e2r simulate ./my-electron-app --record ./predictions.json
+
+# ... migrate, measure the real app, write measurements.json ...
+
+# Compare predictions vs actuals, and teach the model
+e2r calibrate ./my-electron-app --actual ./measurements.json --record ./predictions.json
+```
+
+Sample report (trimmed; the minimal fixture app, Linux target):
+
+```
+Migration simulation: minimal-electron-app
+Feasibility: 100/100 — Good fit — mostly automatic
+Model: 0.1.0 (research-backed — predictions are ranges with confidence levels, not measurements)
+
+Migratable breakdown (22 API call sites)
+  AUTO      20 (90.9%)
+  ASSISTED  2 (9.1%)
+  MANUAL    0 (0.0%)
+
+UI preservation (ui-preserving / system webview mode)
+  Estimated carry-over: 100.0% unchanged
+
+Predicted gains (before → after)
+  bundle size: 90–160 (point 106) MB → 12–22.4 (point 15.4) MB — medium confidence
+  memory linux: unknown — no reliable baseline
+  startup time: unknown baseline → 0.8–1.3 (point 1) multiple of current startup time — low confidence
+  process count linux: 4–6 (point 5) processes → 4–7 (point 5) processes — low confidence
+  cpu: unknown — no reliable baseline
+
+Effort hint: small (rough guide)
+```
+
+Full simulator docs (model, data sources, calibration loop):
+[docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) §5 and
+[converters/electron/README.md](converters/electron/README.md#commands).
+
+## The MCP server — the Migration Brain for your agent
+
+`e2r serve` exposes the same Brain to any coding agent over the Model Context
+Protocol (stdio): the agent does the coding, the server analyses, plans, looks
+up, simulates, and validates. Conversion itself stays a CLI step — the agent
+runs `e2r convert` in a shell after you have seen the plan and said go.
+
+```sh
+# Install (same as the Quickstart above), then point your agent at it
+cargo install --path converters/electron/crates/e2r-cli
+
+# Copy-paste configs live in skills/e2r/ — one file per agent:
+#   skills/e2r/claude-code.mcp.json  → .mcp.json (project) or ~/.claude.json
+#   skills/e2r/codex-config.toml     → ~/.codex/config.toml
+#   skills/e2r/opencode.json         → opencode.json (project or ~/.config/opencode/)
+# Restart the agent after editing its config, then verify without any agent:
+./skills/e2r/smoke-test.sh
+```
+
+| Tool | What it does |
+| --- | --- |
+| `analyse_electron_app` | Scan an Electron app: feasibility score, findings (AUTO/ASSISTED/MANUAL), IPC channels, windows, menus, preload shape. |
+| `get_migration_plan` | Ordered migration plan: steps, per-API replacements, MANUAL items first, effort hint. |
+| `get_rust_replacement` | Look up one Electron API in the 48-row mappings DB: Tauri equivalent + classification + plugin + notes. |
+| `simulate_migration` | Pre-migration simulation: migratable breakdown, UI-preservation estimate, before→after predictions with ranges + confidence + basis. |
+| `validate_migration` | Static check of a converted Tauri project: carried over, missing, `TODO(e2r)` stubs remaining, remaining manual work. Does **not** run `cargo check`. |
+| `get_decision_log` | The append-only decision registry (`.e2r/decisions.jsonl` in a project, else `~/.cache/e2r/decisions.jsonl`). |
+
+Full tool reference (input schemas, output shapes, error codes, decision-log
+format): [docs/MCP.md](docs/MCP.md). The agent skill — when to use the server,
+the canonical analyse → simulate → plan → convert → validate workflow, and the
+mandatory honesty rules — is [skills/e2r/SKILL.md](skills/e2r/SKILL.md).
 
 ## Why now
 
@@ -129,8 +217,8 @@ source-to-source converter — which is what lets new sources and targets plug i
 
 | Phase | Name | What ships |
 | --- | --- | --- |
-| **1** | Core Intelligence & Simulation | The v0.1 CLI (`scan` + `convert`, data-driven mappings, golden fixture, CI) plus the parser-based analyzer, the Intermediate Representation, the pre-migration simulator, and the decision registry. |
-| **2** | Agent Integration | MCP server (`analyse_electron_app`, `get_migration_plan`, `get_rust_replacement`, `simulate_migration`, `validate_migration`, `get_decision_log`), agent skills (OpenCode, Claude Code, Codex, Antigravity), IDE extensions, record/replay parity checks, and the Stage 1 sidecar-shim mode. |
+| **1** | Core Intelligence & Simulation | The v0.1 CLI (`scan` + `convert`, data-driven mappings, golden fixture, CI) plus the parser-based analyzer, the Intermediate Representation, the pre-migration simulator (shipped: `simulate` + `calibrate`), and the decision registry. |
+| **2** | Agent Integration | MCP server (shipped: `analyse_electron_app`, `get_migration_plan`, `get_rust_replacement`, `simulate_migration`, `validate_migration`, `get_decision_log`), agent skills (shipped: OpenCode, Claude Code, Codex; Antigravity planned), IDE extensions, record/replay parity checks, and the Stage 1 sidecar-shim mode. |
 | **3** | Companion Experience | The Live Migration Companion window (floating overlay + full workspace app; Simulation / Live / Verification modes), the structured event bus, Migration Replay, and the Developer Dashboard. |
 | **4** | ML & Validation | The Performance Prediction Engine's learning loop (predicted vs. actual, fed back into the simulator), UI regression detection, native-module recipes (`node-pty`, `better-sqlite3`), and the full-native UI target option (egui / Iced / Dioxus / Slint — and GPUI for teams that want Discord's route). |
 | **5** | Marketplace & Hosted Intelligence | Community-contributed mappings and recipes as a marketplace, and an optional hosted platform. The open-source core stays open source. |
@@ -299,6 +387,8 @@ More converter questions: [converters/electron/README.md](converters/electron/RE
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — crate layout, data flow, planned modules.
 - [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) — engineering design: IR, analyzer,
   simulator, decision registry, validation, companion event protocol, ML loop.
+- [docs/MCP.md](docs/MCP.md) — the MCP server: the six tools, input schemas,
+  output shapes, error codes, and the decision-log format.
 - [docs/API-MAP.md](docs/API-MAP.md) — the Electron → Tauri API map (mirrors the mappings JSON).
 
 ## Contributing

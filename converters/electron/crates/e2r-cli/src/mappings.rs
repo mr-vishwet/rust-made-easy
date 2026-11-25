@@ -8,10 +8,10 @@
 //! Each entry maps one Electron API to its Tauri target and rates the
 //! conversion: `"auto"`, `"assisted"` or `"manual"`.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// One row of the Electron → Tauri mapping table.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Mapping {
     /// Electron API name, e.g. `"ipcMain.handle"`.
     pub electron_api: String,

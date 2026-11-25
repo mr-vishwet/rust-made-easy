@@ -232,10 +232,12 @@ file); splitting them into a `codegen/` module is a planned refactor, not yet do
 | `gen_menu_rs` | `src-tauri/src/menu.rs` | Menu builder (when a static template was found; original template kept as comments) |
 | `gen_bridge_ts` | `src/lib/e2r-bridge.ts` | Typed `invoke()` wrapper replacing `ipcRenderer`; one function per channel |
 | `gen_notes` | `MIGRATION-NOTES.md` | What converted, what needs a human, what can't — with file/line references |
+| `detect_renderer` + copy | `dist/` / `src/` | Carried-over renderer: built output, bundler source, or static files; `frontendDist` / `devUrl` wired to match |
 
 Also generated: `src-tauri/build.rs` (required by `generate_context!()`), a placeholder
-`src-tauri/icons/icon.png` (128×128; `generate_context!()` panics without an icon), a
-placeholder `dist/index.html` (`frontendDist` must exist for the build), `package.json`,
+`src-tauri/icons/icon.png` (128×128; `generate_context!()` panics without an icon), the
+carried-over renderer in `dist/` (a placeholder `dist/index.html` only when no renderer
+files were found — `frontendDist` must exist for the build), `package.json`,
 `.gitignore`, and a generated `README.md` with the next steps. Capability files
 (`capabilities/`) are **not** generated in v0.1 — least-privilege capabilities arrive with
 the Tauri 2 permissions work in a later phase.
@@ -248,53 +250,172 @@ Template rules:
   generated project in CI. A template that generates broken code fails the build.
 - **Generated code is readable scaffolding, not magic.** It carries comments naming the
   Electron API it came from, so the developer can read the migration.
-- **The renderer is NOT copied in v0.1.** The generated project ships a placeholder
-  `dist/index.html`; the developer copies their renderer source into `src/` (or points
-  `build.frontendDist` at their existing build output) and deletes the placeholder, as
-  `MIGRATION-NOTES.md` explains. Automatic renderer copying is planned — in UI-preserving
-  mode the frontend files will be copied verbatim and only the IPC transport changes.
+- **The renderer is carried over.** Detection order: existing build output
+  (`dist/`/`build/`/`out/` with an `index.html`), then bundler source plus its preserved
+  build script (`build:frontend`, wired as `beforeBuildCommand`), then static files at the
+  app root into `dist/`. A placeholder `dist/index.html` is generated only when no renderer
+  files are found. The dev server port comes from the dev script's `--port`, the Vite
+  config's `server.port`, or the bundler default (Vite 5173, webpack 8080); the Tauri
+  default 1420 is only a fallback, flagged in the notes. Exotic setups (electron-vite,
+  Next.js without static export, custom output dirs) are named in `MIGRATION-NOTES.md`,
+  never silently replaced with a placeholder.
 
 ---
 
-## 5. Simulator design — [PLANNED, phase 1]
+## 5. Simulator design — [SHIPPED: roadmap phase 1]
 
-The pre-migration simulator is the killer feature: it predicts the migration's shape and
-payoff **before any code changes**.
+The pre-migration simulator (`e2r simulate`, `e2r calibrate`) predicts the migration's
+shape and payoff **before any code changes**. It is implemented in
+`converters/electron/crates/e2r-cli/src/simulate.rs` (report + predictions),
+`reference.rs` (every model constant, with citation and confidence), and
+`calibrate.rs` (the calibration loop). Model version `0.1.0`, research-backed.
 
 ### 5.1 Inputs
 
-- The IR (API inventory, IPC graph, dependency list, framework, size metrics).
-- The compatibility DB (status + effort estimate per API).
-- Historical calibration data (phase 4 learning loop; initially, conservative defaults).
+- The scan report (`scan::scan`) — the single source of truth for APIs,
+  classifications, windows, native modules, and the feasibility score. The simulator
+  never re-scans or re-classifies.
+- The converter's renderer detection (`convert::detect_renderer`) — the single source
+  of truth for how the renderer carries over (built output vs. bundler source vs.
+  static files).
+- The model constants (`reference.rs`) — every number the prediction model uses, each
+  with its citation and confidence. The model logic reads constants from this module
+  only, never hardcodes a model number.
+- The target platform (`--target-platform macos|windows|linux`, default: host) —
+  memory and process count are platform-dependent, so those predictions carry their
+  platform in their metric id (`memory_macos`, `process_count_windows`, ...).
+- The calibration log (`~/.cache/e2r/calibration.jsonl`, overridable via `--log` /
+  `E2R_CALIBRATION_LOG`) — past predicted-vs-actual comparisons adjust the confidence
+  intervals (see §5.4).
 
 ### 5.2 Outputs
 
-- **Migratable %** — share of the API surface that is AUTO, ASSISTED, MANUAL.
-- **UI preserved %** — share of the renderer that carries over unchanged (100% in
-  UI-preserving mode by construction; the number matters for full-native mode).
-- **Predicted gains with confidence ranges** — memory, CPU, startup time, bundle size, each
-  as a range (e.g. "bundle 120 MB → 15–35 MB, medium confidence"), never a single number.
-- **Warnings** — DRM, native modules, WebKit-sensitive UI on Linux, Chromium-only APIs.
-- **Effort estimate** — staged, by phase of the migration ladder.
+- **Migratable breakdown** — API call sites by classification (AUTO / ASSISTED /
+  MANUAL), weighted by occurrences, percentages summing to exactly 100.
+- **UI preservation estimate** — share of the renderer that carries over unchanged in
+  UI-preserving (system webview) mode, as a product of four factors (renderer kind,
+  framework, bundler, Electron-API touch points in renderer sources, each with
+  file:line). A full-native UI rewrite is out of scope for the estimate.
+- **Predicted gains with confidence ranges** — bundle size, memory, startup time,
+  process count, CPU — each a range (low < point < high) with a confidence level, a
+  basis string, and an assumptions list. Never a single number. See §5.3 for the
+  model.
+- **Warnings** — native modules, MANUAL APIs, nodeIntegration, contextIsolation off,
+  Chromium-only APIs, DRM (Widevine) references, missing preload for ipcRenderer use,
+  plus the renderer's own caveats. Sorted and deduplicated.
+- **Effort hint** — trivial / small / medium / large, from the MANUAL share and the
+  native-module count. A rough guide, labeled as such.
+- **Predictions record** (`simulate --record <path>`) — the predicted *after* ranges
+  in a stable JSON format (schema version 1, see `model::PredictionsRecord`) for the
+  calibration loop.
 
-### 5.3 Honesty rules
+### 5.3 The model (research-backed, 0.1.0)
 
-- Predictions are **ranges with confidence levels**, computed from the IR and the
-  compatibility DB — not from vibes, and never from the planning chat's illustrative samples.
-- The simulator **shows its work**: every predicted number links to the IR facts and mapping
-  entries it came from.
-- Where the model has no basis (e.g. an app dominated by MANUAL APIs), the simulator says
-  "low confidence" or declines to predict, rather than inventing a number.
+Data sources with citations live in `docs/RND.md` §11; the constants live in
+`reference.rs`. Summary:
+
+| Metric | Model | Confidence | Basis |
+| --- | --- | --- | --- |
+| Bundle size (after) | 0-plugin release binary 11.0–17.4 MB (point 11.4) + ~2 MB per plugin (0.5–2.5) + measured app payload | High | Measured: 5 e2r-generated Tauri 2.12.7 release builds, Linux x86_64 |
+| Bundle size (before) | Measured installed runtime (±5%) when present; else the Electron installer range 90–160 MB (point 106) | High / Medium | Measured: Electron 45.5.0 dist 273.7 MiB unpacked, 118.2 MiB compressed; Dawloom 106.1 MB NSIS |
+| Memory, macOS | −40% (ratio 0.4–0.7, point 0.6), idle, one window | Medium | wolinski 86.0 → 59.5 MiB; Elanis 364 → 96 MB; Hopp 409 → 172 MB |
+| Memory, Windows | ~0% (ratio 0.9–1.1, point 1.0), idle, one window | Low | Dawloom 149 → 142 MB; lleg 103.3 → 108 MB; skathi 88.8 → 95.2 MiB — sign inconsistent |
+| Memory, Linux | **Unknown — refused, no number** | Unknown | No published Linux measurement exists |
+| Startup time | No improvement: ratio 0.8–1.3×, point exactly 1.0 | Low | wolinski tie (macOS); skathi Electron faster (Windows first frame) — sources disagree on the sign |
+| Process count, 1 window | Electron 4; Tauri 4 (macOS) / 7 (Windows) / ~4 (Linux, unmeasured inference) | High (Win) / Medium (macOS) / Low (Linux) | Dawloom + skathi (Windows, agree exactly); wolinski (macOS) |
+| CPU | **Unknown — refused, no number** | Unknown | Idle CPU is noise-level in both frameworks (skathi); load CPU unmeasured anywhere |
+
+Rules the model follows:
+
+- **Bundle size is modeled from measured e2r outputs**, not from the third-party
+  "3–15 MB" range. That range does not appear in the official Tauri docs (the docs
+  claim only that a minimal app "can be less than 600KB" — a floor, not a typical
+  outcome). The after range is the default-profile binary e2r produces today (no
+  `[profile.release]`, unstripped); the optimised-profile figure (~5 MB, 1–15 MB)
+  appears only as a clearly-labeled model estimate in the assumptions, never as the
+  prediction.
+- **The ±6 MB anomaly is absorbed.** Two near-identical e2r outputs (electro-dash-v2
+  17.10 MB vs built-output 11.42 MB, identical deps) differ by 5.68 MB of unnamed
+  `.rodata`, cause unknown — reproduced byte-identically from a clean `target/`
+  (2026-11-25), so it is not a stale-artifact effect. The after range's high end
+  carries the full ~6 MB. See RND.md §11.
+- **Memory is per-platform, never blended.** macOS (WKWebView) sees a real idle-memory
+  win; Windows (WebView2 is Chromium) sees about none; Linux is refused. The
+  prediction is a ratio of current usage, idle, one window — loaded/active memory is
+  unmeasured.
+- **Startup never predicts an improvement.** The point is exactly 1.0 ("no meaningful
+  change"); the interval 0.8–1.3× says either way within ~30%. A cold-start advantage
+  from the smaller binary on slow disks is plausible but unmeasured — not modeled.
+- **Process count can go UP.** On Windows Tauri runs 7 processes to Electron's 4. The
+  simulator never claims "fewer processes" as a benefit. Multi-window Tauri scaling is
+  unmeasured, so the after high end widens by an extra process per additional window.
+- **Unknown means unknown, with no number.** CPU (idle and load), Linux memory, and
+  loaded/active memory are refused, not guessed.
+
+Still unresearched (model parameters, low confidence, pending calibration): the
+UI-preservation factors, the effort-hint thresholds, and the ±5% measured-runtime
+spread. They are marked as model parameters in `reference.rs` and say so in their
+notes.
+
+### 5.4 Calibration loop
+
+`e2r calibrate <app-dir> --actual <measurements.json> [--record <path>] [--log <path>]`
+compares a predictions record against measured post-migration actuals and appends one
+JSONL entry per compared metric to the calibration log
+(`~/.cache/e2r/calibration.jsonl` by default). The measurements schema
+(`schema_version` 1; `app`, `measured_at`, `platform`, `metrics` with optional
+`bundle_size_mb`, `memory_before_mb`/`memory_after_mb`,
+`startup_before_ms`/`startup_after_ms`, `process_count`) is documented in
+`converters/electron/README.md` and in `model::Measurements`.
+
+Memory and startup predictions are ratios, so they need a before AND an after
+measurement; a lone after-value is reported as not comparable, not forced. Only
+metrics present in both the record and the actuals are compared; the rest are listed
+with the reason. A platform mismatch between record and measurements produces a
+warning (memory and process-count predictions are per-platform).
+
+`simulate` reads the log on every run. For each metric with ≥3 logged comparisons,
+the interval adjustment is deterministic: fewer than half of the actuals inside their
+predicted intervals → widen 1.5×; all inside → narrow 0.8×, floored at ±10% of the
+point; otherwise no change. The point never moves — calibration adjusts confidence,
+not the central estimate — and an adjusted prediction says so in its assumptions. A
+missing, empty, or corrupt log behaves exactly like no calibration (a stderr warning,
+never a crash). Tests use `--no-calibration` / `CalibrationInput::Disabled` so
+results never depend on the developer's log.
+
+### 5.5 Honesty rules
+
+- Predictions are **ranges with confidence levels**, computed from the scan report
+  and the research-backed constants — not from vibes, and never from the planning
+  chat's illustrative samples.
+- The simulator **shows its work**: every predicted number carries a basis string
+  naming where it came from and an assumptions list naming what it assumes.
+- Where the model has no basis, the simulator declines to predict, rather than
+  inventing a number.
+- The report is deterministic: same app → byte-identical JSON (the predictions
+  record's `generated_at` timestamp is the one exception, and it lives in a separate
+  file).
 
 > **Illustrative example of output shape (NOT a measurement).** The planning chat sketched
 > simulator output shaped like: readiness 86/100; 82% of APIs migratable, 18% custom, 94% UI
 > preserved; startup 2.1s → 1.7s; memory 380 MB → 265 MB; CPU 22% → 9%; binary 120 MB →
-> 28 MB. These are invented examples. Real simulator output will be ranges with confidence
-> levels, computed from real IR data, and measured against actuals after migration.
+> 28 MB. These are invented examples. Real simulator output is ranges with confidence
+> levels, computed from real scan data and the research-backed model in §5.3, and measured
+> against actuals after migration via the calibration loop in §5.4.
 
 ---
 
-## 6. Decision registry format — [PLANNED, phase 1]
+## 6. Decision registry format — [SHIPPED: roadmap phase 1, format v1]
+
+> **Shipped format (v1).** The registry ships as append-only JSONL at
+> `<project>/.e2r/decisions.jsonl`, one entry per API finding, written by
+> `convert` and read back by the MCP `get_decision_log` tool — see §11.4 and
+> [MCP.md](MCP.md#the-decision-log). The draft schema below (with
+> `id`/`scope`/`subject`/`decision`/`made_by`) is the original design sketch;
+> v1 records `electron_api`, `tauri_replacement`, `classification`, `rationale`,
+> `confidence`, and `source` instead, and there is no `supersedes` field yet —
+> a changed decision is a new entry, and readers take file order as the order
+> of events.
 
 Every migration decision is recorded with its reason, so agents don't repeat mistakes across
 sessions or across apps. The registry is a JSONL file written into the output project (and
@@ -395,6 +516,12 @@ Event rules:
 
 ## 9. ML / learning loop — [PLANNED, phase 4]
 
+> **Note:** the deterministic core of this loop already ships in phase 2 — see §5.4
+> (`e2r calibrate` + the calibration log + interval adjustment). What remains for
+> phase 4 is the learning beyond interval adjustment: per-app-profile calibration,
+> the bench step that measures actuals automatically, and any ML on top of the
+> discrepancy records. The constraints below still apply to all of it.
+
 The Performance Prediction Engine gets better by learning from every migration:
 
 ```
@@ -433,7 +560,7 @@ Mapping the design above to the five phases in [PRD.md](../PRD.md):
 | Phase | Engineering deliverables |
 | --- | --- |
 | **1 — Core Intelligence & Simulation** | v0.1 CLI (shipped: scan, convert, mappings, fixture, CI) → parser-based analyzer → IR (schema + JSON) → simulator (ranges + confidence) → decision registry → compatibility DB v1 (versioned schema). |
-| **2 — Agent Integration** | MCP server (`e2r-mcp`) with the six standard ops → agent skills (OpenCode, Claude Code, Codex, Antigravity) → IDE extensions → record/replay parity checks → Stage 1 sidecar-shim mode. |
+| **2 — Agent Integration** | MCP server (shipped: `e2r serve`, six tools — see §11) → agent skills (shipped: OpenCode, Claude Code, Codex; Antigravity planned) → IDE extensions → record/replay parity checks → Stage 1 sidecar-shim mode. |
 | **3 — Companion Experience** | Event bus (`e2r-core::events`, local IPC/WebSocket) → companion app (`e2r-companion`, Tauri + Rust; overlay + workspace forms) → three modes (Simulation / Live / Verification) → Migration Replay from the event log → Developer Dashboard views. |
 | **4 — ML & Validation** | UI regression detection → bench step + discrepancy records → calibration loop → native-module recipes → full-native UI target option (egui / Iced / Dioxus / Slint, accessibility assessed first). |
 | **5 — Marketplace & Hosted Intelligence** | Community mapping/recipe marketplace (submission + review pipeline) → optional hosted intelligence (opt-in, aggregated calibration data; team dashboards) → the core stays local-first and open source. |
@@ -442,3 +569,128 @@ Mapping the design above to the five phases in [PRD.md](../PRD.md):
 The invariant across all phases: **the IR is the seam**. Everything upstream knows about
 Electron; everything downstream doesn't. Build the seam right in Phase 1, and every later
 phase is an addition, not a rewrite.
+
+---
+
+## 11. MCP server — [SHIPPED: roadmap phase 2]
+
+`e2r serve` runs the Migration Brain as an MCP server on stdio, so any coding agent can
+analyse, plan, look up, simulate, and validate without shelling out to the CLI. The tool
+reference (input schemas, output shapes, error codes) lives in
+[MCP.md](MCP.md); this section is the engineering design.
+
+### 11.1 Where it lives: handler / transport split
+
+The server is one module, `converters/electron/crates/e2r-cli/src/mcp.rs`, plus the
+`Serve` arm in `src/main.rs`. The module is split in two layers:
+
+- **Handlers** — six plain synchronous functions
+  (`analyse_electron_app`, `get_migration_plan`, `get_rust_replacement`,
+  `simulate_migration`, `validate_migration`, `get_decision_log`), each returning
+  `Result<serde_json::Value, ToolError>`. They call the same library code the CLI
+  uses (`scan::scan`, `simulate::simulate`, `mappings::lookup`,
+  `decisions::read_with_stats`) — the server adds no second implementation of
+  anything, so the CLI and the MCP tools can never disagree about an app. Because
+  the handlers are transport-free, they are unit-tested directly, with no server
+  in the loop.
+- **Adapter** — the `#[tool]` methods on `E2rServer`, a thin layer that calls the
+  handler of the same name and wraps the outcome with `result_from`: success
+  becomes `CallToolResult::structured`, failure becomes
+  `CallToolResult::structured_error` with `isError: true` and the structured
+  error object (`{"code", "message", "details?"}` — see `ToolError`). No handler
+  panics on bad input: a missing directory, an unknown API, or a malformed
+  argument is a structured error, never a crash.
+
+The request structs (`AnalyseRequest`, `MigrationPlanRequest`,
+`ReplacementRequest`, `SimulateRequest`, `ValidateRequest`,
+`DecisionLogRequest`) derive `JsonSchema` via schemars, so the input schemas
+`tools/list` serves are generated from the same structs the handlers
+deserialize — the documented schema and the accepted input cannot drift apart.
+
+### 11.2 Why rmcp, not hand-rolled JSON-RPC
+
+The server is built on [rmcp](https://crates.io/crates/rmcp) 3.11.0 (the official
+Rust MCP SDK, `server` + `transport-io` features), not on a hand-written
+JSON-RPC layer. The SDK owns the transport (stdio), the `initialize` handshake
+and protocol-version negotiation, the JSON-RPC framing, and the `tools/list`
+machinery — including the schemars-derived input schemas, which come for free
+from the request structs. A hand-rolled layer would have to reimplement all of
+that, and every line of it is protocol surface an agent client can trip over. A
+spike proved the SDK builds and answers over stdio before the full server was
+written, so the choice was verified, not assumed.
+
+### 11.3 The tokio runtime is confined to `serve`
+
+`main.rs` stays synchronous: `run()` is a plain function, `main` returns an
+`ExitCode`, and `scan` / `simulate` / `calibrate` / `convert` never touch
+async. Only the `Serve` arm builds a runtime — a small multi-threaded tokio
+runtime, created for that arm alone — and blocks on `mcp::serve_stdio()`, which
+serves `E2rServer` over stdio until the client disconnects (stdin EOF). The
+async surface is exactly one arm of one match; nothing else in the CLI pays for
+it.
+
+### 11.4 Decision registry design
+
+The registry is the audit trail for a migration: one decision per Electron API
+finding, recorded with its reason so agents don't repeat mistakes across
+sessions or across apps. It lives in `src/decisions.rs`.
+
+- **Format v1, append-only JSONL.** One JSON object per line; the file is only
+  ever appended to, never rewritten. An entry is `{version: 1, timestamp
+  (RFC 3339 UTC), electron_api, tauri_replacement (null for manual ports),
+  classification ("auto"|"assisted"|"manual"), rationale, confidence
+  ("high"|"medium"|"low", following the classification), source
+  ("mappings-db"|"rule"|"human-override")}`. `human-override` is reserved: no
+  writer produces it yet, so a future override tool can append entries without
+  a format bump. Field names and the version must not change without bumping
+  `DECISION_FORMAT_VERSION`; new optional fields may be added with
+  `#[serde(default)]`. (This supersedes the §6 draft schema.)
+- **One writer, one reader.** `convert` writes: one entry per finding, via
+  `decisions::entries_from_findings` (rationale = the finding's note, with a
+  classification-derived fallback when the note is empty; source =
+  `mappings-db` when the mappings table has a row for the API, `rule`
+  otherwise), appended to `<out-dir>/.e2r/decisions.jsonl`. The MCP tool
+  `get_decision_log` reads, via `decisions::read_with_stats`. Nothing else
+  writes or reads the log.
+- **Paths, in precedence order.** An explicit project directory wins
+  (`<project>/.e2r/decisions.jsonl`), then the `E2R_DECISIONS_LOG` environment
+  variable (when set and non-empty), then the default
+  `~/.cache/e2r/decisions.jsonl` — falling back to `.e2r/decisions.jsonl`
+  under the current directory when `HOME` is unset. This mirrors the
+  calibration log's resolution (`calibrate::calibration_log_path`).
+- **Tolerant reader, never-failing writer.** `read_with_stats` skips corrupt
+  lines and counts them (`skipped`; blank lines don't count), and a missing
+  file reads as an empty log — a damaged log never breaks the tools that
+  consume it. Conversely, writing the log must never fail a conversion: on a
+  write error `convert` records a warning in its `ConvertReport` and
+  continues. The log is a metadata sidecar, deliberately not listed in
+  `files_written`.
+- **Concurrency.** Appends open the file in append mode and write each entry
+  with a single `writeln!`, so concurrent writers interleave whole lines
+  rather than corrupting each other.
+
+### 11.5 Test strategy
+
+Three layers, all fast (no `cargo check` anywhere in the MCP tests):
+
+- **Unit tests in the modules** — 16 in `mcp.rs` (every handler: success shape,
+  determinism of the plan, unknown-API / bad-platform / missing-dir errors,
+  validation of a converted fixture, decision-log round trip through
+  `convert`) and 6 in `decisions.rs` (append/read round trip, append-only
+  behaviour, missing file reads empty, corrupt lines skipped and counted,
+  path resolution, entries from findings). Lib unit tests total 139.
+- **Integration tests in `tests/mcp.rs`** — 10 tests driving the real
+  `e2r serve` binary over stdio (spawned via `CARGO_BIN_EXE_e2r`, built by the
+  test harness): the `initialize` handshake (server name `e2r`, protocol
+  version `2025-03-26`), `tools/list` (exactly the six tools, with input
+  schemas and descriptions), one `tools/call` per tool against the fixtures,
+  unknown-tool (`ping` as a tool name) as JSON-RPC `-32602`, malformed input
+  as structured errors (never a panic), direct handler checks for the
+  structured-JSON shape of every tool, the MANUAL call-out in the plan, and
+  the server exiting promptly on stdin EOF (< 10 s for a whole exchange).
+- **Golden tests** — unchanged (10 tests, including the real `cargo check` on
+  generated Tauri projects); the MCP layer adds no new golden fixture, because
+  it adds no new generated code.
+
+`cargo fmt --check` and `cargo clippy -- -D warnings` are clean, and the full
+suite (`cargo test`) is green.

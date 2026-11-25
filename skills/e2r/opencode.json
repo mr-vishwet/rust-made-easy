@@ -1,0 +1,15 @@
+{
+    "$schema": "https://opencode.ai/config.json",
+    "_comment": "e2r MCP server \u2014 OpenCode v2 config. Merge the \"mcp\" object into opencode.json (project root) or ~/.config/opencode/opencode.json (global), then restart OpenCode. V2 form: server names go under mcp.servers. (Older OpenCode v1 placed server names directly under \"mcp\" \u2014 if your version ignores mcp.servers, move the \"e2r\" entry up one level under \"mcp\".) The command must resolve on PATH (cargo install --path converters/electron/crates/e2r-cli); otherwise use the absolute path, usually ~/.cargo/bin/e2r, as the first element of \"command\".",
+    "mcp": {
+        "servers": {
+            "e2r": {
+                "command": [
+                    "e2r",
+                    "serve"
+                ],
+                "type": "local"
+            }
+        }
+    }
+}

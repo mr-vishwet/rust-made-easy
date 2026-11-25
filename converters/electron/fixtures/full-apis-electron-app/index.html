@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Full APIs App</title>
+  </head>
+  <body>
+    <h1>Full APIs App</h1>
+    <p>
+      This fixture exercises the updater, opener, and notification plugins:
+      check for updates, open an external link, or show a notification.
+    </p>
+    <button id="check-updates">Check for updates</button>
+    <button id="open-docs">Open documentation</button>
+    <button id="notify">Show notification</button>
+    <p id="status"></p>
+    <script>
+      const status = document.getElementById('status');
+      document.getElementById('check-updates').addEventListener('click', async () => {
+        const version = await window.api.checkForUpdates();
+        status.textContent = version
+          ? `Latest version: ${version}`
+          : 'No update information available.';
+      });
+      document.getElementById('open-docs').addEventListener('click', async () => {
+        await window.api.openExternal('https://github.com/mr-vishwet/rust-made-easy');
+      });
+      document.getElementById('notify').addEventListener('click', async () => {
+        await window.api.showNotification('Hello from the fixture', 'This is a test notification.');
+      });
+    </script>
+  </body>
+</html>

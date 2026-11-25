@@ -1,0 +1,9 @@
+# e2r MCP server — Codex config.
+# Merge this section into ~/.codex/config.toml, then restart Codex.
+# "e2r" must resolve on PATH (cargo install --path converters/electron/crates/e2r-cli);
+# if it doesn't, replace "e2r" with the absolute path to the cargo-installed
+# binary, usually ~/.cargo/bin/e2r.
+
+[mcp_servers.e2r]
+command = "e2r"
+args = ["serve"]

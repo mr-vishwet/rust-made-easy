@@ -1,0 +1,1 @@
+{"dependencies":{"electron-store":"^8.0.0","electron-updater":"^6.1.7"},"description":"Electron app fixture for electron-to-rust golden tests: autoUpdater, shell.openExternal, Notification, and a preload that exposes a second key","devDependencies":{"electron":"^30.0.0"},"main":"main.js","name":"full-apis-electron-app","scripts":{"start":"electron ."},"version":"1.0.0"}

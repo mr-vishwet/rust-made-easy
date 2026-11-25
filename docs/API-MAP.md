@@ -20,7 +20,7 @@
 | `app.quit()` | `app.exit(0)` | `tauri` | AUTO | `app.exit(code)` takes an exit code; plain `quit()` maps to `exit(0)`. |
 | `BrowserWindow` | `WebviewWindow` | `tauri` | AUTO | Window options map to `WebviewWindowBuilder`. `webPreferences` need review — see notes on preload below. |
 | `ipcMain.handle(channel, fn)` | `#[tauri::command] fn` | `tauri` | AUTO | One Rust command per handler; channel name becomes the command name (snake_case). |
-| `ipcMain.on(channel, fn)` | `#[tauri::command]` + `emit` | `tauri` | AUTO | Fire-and-forget handlers become commands; replies use `app.emit()` / window events. |
+| `ipcMain.on(channel, fn)` | `app.listen(channel, fn)` + `emit` | `tauri` | AUTO | Fire-and-forget handlers become `app.listen` stubs in `src-tauri/src/listeners.rs`; the bridge emits to them. |
 | `ipcRenderer.invoke(channel, …)` | `invoke(channel, …)` | `@tauri-apps/api/core` | AUTO | Rebound in the generated `src/lib/e2r-bridge.ts`; call sites keep their shape. |
 | `ipcRenderer.on(channel, fn)` | `listen(channel, fn)` | `@tauri-apps/api/event` | AUTO | Event listeners rebound to Tauri's event system. |
 | `ipcRenderer.send(channel, …)` | `emit(channel, …)` | `@tauri-apps/api/event` | AUTO | Fire-and-forget sends become `emit`. |
@@ -37,7 +37,12 @@
 | `protocol.registerFileProtocol` | custom URI scheme | `tauri` (`UriSchemeProtocol`) | ASSISTED | The scheme registration converts; the handler's file-serving logic needs a Rust port of its path resolution. |
 | `session` / `ses.cookies` | Webview cookie APIs | — | MANUAL | No direct equivalent: the system webview's cookie handling is thinner than Chromium's `session`. Per-app design needed. |
 | `safeStorage` | OS keychain | `tauri-plugin-stronghold` / keyring | ASSISTED | Encryption-to-keychain mapping exists, but key migration (existing encrypted data) needs a per-app plan. |
-| `nativeTheme` | `window.set_theme()` / CSS | `tauri` | ASSISTED | Dark/light detection maps; `shouldUseDarkColors` listeners need a small manual port. |
+| `nativeTheme` | `set_theme` command (`window.set_theme()`) | `tauri` | AUTO | `themeSource` maps to a real command (call via `api.setTheme`); `shouldUseDarkColors` listeners need a small manual port. |
+| `app.requestSingleInstanceLock` | `tauri-plugin-single-instance` | `tauri-plugin-single-instance` | AUTO | Lock + second-instance argv handling map to the plugin; the focus/restore logic still needs porting. |
+| `app.setAsDefaultProtocolClient` | `tauri-plugin-deep-link` | `tauri-plugin-deep-link` | AUTO | Protocol registration maps to the plugin; the open-url / second-instance URL handling still needs porting. |
+| `electron-window-state` | `tauri-plugin-window-state` | `tauri-plugin-window-state` | AUTO | Position/size persistence maps to the plugin; `defaultWidth`/`defaultHeight` carry over as the window's initial size. |
+| `nodeIntegration: true` | — | — | MANUAL | A Tauri webview has no Node.js runtime; renderer code importing `electron` or Node builtins needs a rewrite against the bridge. |
+| `remote` / `@electron/remote` | — | — | MANUAL | No Tauri equivalent; every remote call becomes an explicit `invoke()` + Rust command. |
 | `autoUpdater` | `tauri-plugin-updater` | `tauri-plugin-updater` | AUTO | Update endpoints and signatures map; the updater needs a signing key configured by the developer. |
 | `webContents.send(channel, …)` | `window.emit(channel, …)` | `tauri` | AUTO | Main-to-renderer messages become window events. |
 | `webContents.openDevTools()` | `window.open_devtools()` | `tauri` | AUTO | Debug-only; maps directly. |

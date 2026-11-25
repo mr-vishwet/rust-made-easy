@@ -121,9 +121,11 @@ Performs the migration the intelligence engine planned:
 - Identifies Node modules needing Rust replacements and names them.
 - Generates IPC bridges: Rust `#[tauri::command]` functions plus the TypeScript bridge that
   rebinds `ipcRenderer` to `invoke()`.
-- Preserves the frontend where possible — the renderer is copied unchanged in UI-preserving
-  mode (planned; v0.1 generates a placeholder frontend and the developer copies their
-  renderer in, as `MIGRATION-NOTES.md` explains).
+- Preserves the frontend where possible — the renderer is carried over: existing build output
+  (`dist/`/`build/`/`out/` with an `index.html`) is copied verbatim, bundler source is copied
+  with its build script preserved as `build:frontend`, and static renderers are copied into
+  `dist/`; a placeholder frontend is generated only when no renderer files are found at all
+  (see `MIGRATION-NOTES.md`).
 
 v0.1 ships this as `e2r convert`.
 

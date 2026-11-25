@@ -8,10 +8,10 @@
   },
   {
     "electron_api": "app.getPath",
-    "notes": "Standard paths (home, app data, documents) map to Tauri's path API.",
-    "plugin": "tauri-plugin-opener",
+    "notes": "Standard paths (home, app data, documents) map to Tauri's core path API — no plugin needed.",
+    "plugin": null,
     "status": "auto",
-    "tauri_target": "tauri path API (tauri-plugin-opener)"
+    "tauri_target": "tauri path API (app.path())"
   },
   {
     "electron_api": "app.quit",
@@ -82,6 +82,27 @@
     "plugin": "tauri-plugin-dialog",
     "status": "auto",
     "tauri_target": "tauri-plugin-dialog message()"
+  },
+  {
+    "electron_api": "dialog",
+    "notes": "Generic dialog use — check which dialog call this is; most map to the dialog plugin.",
+    "plugin": "tauri-plugin-dialog",
+    "status": "assisted",
+    "tauri_target": "tauri-plugin-dialog"
+  },
+  {
+    "electron_api": "shell",
+    "notes": "Generic shell use — openExternal/openPath map to the opener plugin; check the call site.",
+    "plugin": "tauri-plugin-opener",
+    "status": "assisted",
+    "tauri_target": "tauri-plugin-opener"
+  },
+  {
+    "electron_api": "webContents",
+    "notes": "Generic webContents use (navigation guards, JS evaluation, window-open handling) — check the call site; Tauri equivalents vary by call.",
+    "plugin": null,
+    "status": "assisted",
+    "tauri_target": "tauri WebviewWindow / webview API"
   },
   {
     "electron_api": "Menu",
@@ -250,6 +271,62 @@
     "plugin": null,
     "status": "manual",
     "tauri_target": "rusqlite"
+  },
+  {
+    "electron_api": "app.requestSingleInstanceLock",
+    "notes": "Single-instance lock and second-instance argv handling map to the plugin; the focus/restore logic still needs porting.",
+    "plugin": "tauri-plugin-single-instance",
+    "status": "auto",
+    "tauri_target": "tauri-plugin-single-instance"
+  },
+  {
+    "electron_api": "app.setAsDefaultProtocolClient",
+    "notes": "Deep-link protocol registration maps to the plugin; the open-url / second-instance URL handling still needs porting.",
+    "plugin": "tauri-plugin-deep-link",
+    "status": "auto",
+    "tauri_target": "tauri-plugin-deep-link"
+  },
+  {
+    "electron_api": "nodeIntegration",
+    "notes": "A Tauri webview has no Node.js runtime: renderer code that imports `electron` or Node builtins cannot run unmodified and needs a rewrite against the Tauri bridge.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": null
+  },
+  {
+    "electron_api": "contextIsolation",
+    "notes": "contextIsolation: false lets renderer code reach Node/Electron globals directly; the Tauri bridge replaces that access, so the renderer needs review.",
+    "plugin": null,
+    "status": "assisted",
+    "tauri_target": "preload shim over invoke()"
+  },
+  {
+    "electron_api": "remote",
+    "notes": "The remote module was removed from Electron itself and has no Tauri equivalent; every remote call must become an explicit invoke() + Rust command.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": null
+  },
+  {
+    "electron_api": "electron-updater",
+    "notes": "Auto-updates need the plugin plus a signed update feed; the flow is similar.",
+    "plugin": "tauri-plugin-updater",
+    "status": "auto",
+    "tauri_target": "tauri-plugin-updater"
+  },
+  {
+    "electron_api": "electron-window-state",
+    "notes": "Window position/size persistence maps to the plugin; defaultWidth/defaultHeight carry over as the window's initial size.",
+    "plugin": "tauri-plugin-window-state",
+    "status": "auto",
+    "tauri_target": "tauri-plugin-window-state"
+  },
+  {
+    "electron_api": "@electron/remote",
+    "notes": "The remote package has no Tauri equivalent; every remote call must become an explicit invoke() + Rust command.",
+    "plugin": null,
+    "status": "manual",
+    "tauri_target": null
   },
   {
     "electron_api": "sqlite3",

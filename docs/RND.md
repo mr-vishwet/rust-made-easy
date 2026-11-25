@@ -135,7 +135,10 @@ browser gone completely. Most Electron teams cannot, and should not try:
 - **Tauri 2 is the mature option.** System webview (WebView2 on Windows, WKWebView on macOS,
   WebKitGTK on Linux), a Rust backend, plugins for the common surface, and mobile from the same
   codebase since v2. Typical bundles are 3–15 MB versus Electron's 85–160 MB+ (widely cited
-  ranges, not our measurement).
+  ranges, not our measurement). Correction (November 2026, see §11): the "3–15 MB" range is
+  third-party, not from the Tauri docs — the docs claim only that a minimal app "can be less
+  than 600KB" — and our measured e2r output is 11–27 MB by default (unstripped, no size
+  profile). The simulator models from the measurements, not the cited range.
 - **GPUI stays on the roadmap.** Phase 4 adds a native-UI target option for teams that want to
   follow Discord all the way. But the first target is the one that gets teams out of Electron
   with their UI intact.
@@ -296,13 +299,23 @@ Electron app ──► SCAN ──► MAP ──► GENERATE ──► VERIFY �
    target is, which plugin or crate it needs, and what status it carries. New mappings are a
    data contribution, not a code change (see [CONTRIBUTING.md](../CONTRIBUTING.md)).
 3. **Generate (Tauri 2 project).** Emit `src-tauri/` (`Cargo.toml`, `tauri.conf.json`,
-   `lib.rs`, `commands.rs`, `main.rs`, `build.rs`, a placeholder icon), the TypeScript bridge
-   (`src/lib/e2r-bridge.ts`), a placeholder `dist/index.html`, and `MIGRATION-NOTES.md`. One Rust
-   command per `ipcMain` handler; plugins included only for the APIs the app actually uses.
-   Note: v0.1 does **not** copy the renderer — the developer copies their frontend into the
-   generated project (or points `frontendDist` at their build output) as the migration notes
-   explain; automatic renderer copying is planned.
-4. **Verify.** `cargo check` on the generated project (in CI, against the golden fixture, on
+   `lib.rs`, `commands.rs`, `listeners.rs`, `main.rs`, `build.rs`, the app's real icon when
+   a `BrowserWindow` references a PNG — a placeholder otherwise — and
+   `capabilities/default.json` granting `core:default` plus each included plugin's
+   permissions), the TypeScript bridge (`src/lib/e2r-bridge.ts`), the carried-over renderer,
+   and `MIGRATION-NOTES.md`. One Rust command per `ipcMain.handle` channel and one
+   `app.listen` stub per `ipcMain.on` channel; plugins included only for the APIs the app
+   actually uses. The app's real version, product name, and bundle id flow into
+   `Cargo.toml`, `tauri.conf.json`, and `package.json` when declared. Renderer carry-over
+   prefers existing build output (`dist/`/`build/`/`out/` with an
+   `index.html`), then bundler source plus its preserved build script, then static files at
+   the app root; a placeholder `dist/index.html` is generated only when no renderer files
+   are found. The dev server port is detected from the app's Vite config, dev script, or
+   bundler default (Vite 5173, webpack 8080) — or from the dev URL the main process loads
+   — rather than hardcoded. Exotic setups
+   (electron-vite, Next.js without static export) get an honest note, not a silent
+   placeholder.
+4. **Verify.** `cargo check` on the generated project (in CI, against the golden fixtures, on
    every change). Record/replay parity checks — run the original and the migrated app through
    the same cases and diff the behavior — arrive in phase 2, in the rust-anything style.
 
@@ -310,6 +323,40 @@ The design constraints that matter most: **the tool never modifies the source ap
 goes to a separate `--out` directory); **the generated code must compile** (a mapping that
 generates broken code is worse than no mapping); and **the tool never phones home** (it reads
 your code and generates code, locally, with no telemetry).
+
+### Battle-test: real Electron apps (November 2026)
+
+The v0.1 binary was run against two real Electron apps — `electro-dash`
+(Electron 9, thin main process) and `simplenote-electron` (Electron 34, 2,060
+lines of main-process JS) — and the re-run after fixing the 17 bugs the
+battle-test surfaced measured the following (full per-bug record in the
+working tree, `battle-tests/FIXES.md`; the v0.1 findings are preserved in
+`battle-tests/FINDINGS.md`):
+
+| App | Scan score | Findings (AUTO / ASSISTED / MANUAL) | Generated project `cargo check` |
+| --- | --- | --- | --- |
+| electro-dash | 90/100 (was 100 — the v0.1 score missed the MANUAL `nodeIntegration` finding) | 7 (4 / 2 / 1) | PASS, exit 0, ~3.5 min |
+| simplenote-electron | 80/100 (was 70 — v0.1 charged 15 points for the pure-JS `electron-updater` dep) | 37 (30 / 5 / 2) | PASS, exit 0, ~4 min |
+
+What the re-run proved about the generated code: the Simplenote project
+compiles with six plugins (`tauri-plugin-dialog`, `tauri-plugin-opener`,
+`tauri-plugin-updater`, `tauri-plugin-single-instance`,
+`tauri-plugin-deep-link`, `tauri-plugin-window-state`), a `set_theme` command,
+7 `app.listen` stubs in `listeners.rs`, and a `capabilities/default.json`
+granting `core:default` plus each plugin's `:default` set — and the first
+version of that capability file failed the check, because
+`tauri-plugin-single-instance` exposes no frontend commands and has no
+permission set at all, so naming `single-instance:default` breaks the Tauri
+build script. The Simplenote project's `tauri.conf.json` carries the real
+1024×768 window (from `electron-window-state` defaults), version 2.27.1, and
+bundle id `com.automattic.simplenote`; the electro-dash project's icon is
+byte-identical to the original `assets/icon.png`.
+
+Known limits the re-run confirmed: Simplenote's renderer is still a
+placeholder — the clone ships no `dist/` and its renderer lives in `lib/`,
+which is not a recognized source directory — and a `webContents.send` with a
+variable channel name cannot be statically resolved. Both are reported
+honestly by the tool, not papered over.
 
 > **Diagram attribution.** The architecture diagrams in this repo — the hero diagram in
 > [README.md](../README.md), the ecosystem and Migration Brain diagrams in
@@ -466,3 +513,206 @@ verified, that is marked.
   the direct link was not verified.
 - The exact wording of the VS Code issue announcing a translator attempt (Snowinch's account
   is the source; the issue itself was not fetched).
+
+---
+
+## 11. Simulator research and calibration
+
+The research behind the pre-migration simulator's prediction model (`e2r simulate`,
+model version `0.1.0`). Every number the model uses traces to a measurement made by
+this project or a cited benchmark below; the constants live in
+`converters/electron/crates/e2r-cli/src/reference.rs`, one citation per constant.
+The model design is in [IMPLEMENTATION.md](IMPLEMENTATION.md) §5.
+
+The headline finding: **size is the only metric with a large, reliable,
+mechanism-backed win.** Memory is platform-dependent and small on Windows. Startup
+shows no reliable advantage. CPU has no usable baseline at all. Process count goes
+UP on Windows, not down. The simulator reflects this or it would mislead.
+
+### 11.1 Measured by us: e2r-generated Tauri release binaries
+
+Method: fresh `e2r convert` of the three fixtures plus the two Phase 1 battle-test
+v2 outputs, each built with plain `cargo build --release` (default profile — the
+generated `Cargo.toml` contains NO `[profile.release]`, so no `strip`/`lto`/
+`opt-level="s"`). Rust 1.100.0, Linux x86_64, Tauri 2.12.7 (lockfile). Frontend
+`dist/` in every generated project is a near-empty placeholder, so these binaries
+measure the Tauri runtime + plugins + generated Rust with negligible frontend assets.
+Real apps' frontend assets embed into the binary and add ~1:1 on top. Measured
+2026-11-25.
+
+| Generated project | Source app | Plugins | Release binary | Stripped |
+| --- | --- | --- | --- | --- |
+| minimal-tauri | minimal fixture | 2 (dialog, store) | 12,825,864 B (12.83 MB) | 8,095,488 B (−36.9%) |
+| full-apis-tauri | full-apis fixture | 7 | 26,760,032 B (26.76 MB) | 17,613,832 B (−34.2%) |
+| built-output-tauri | built-output fixture | 0 | 11,419,952 B (11.42 MB) | 7,222,960 B (−36.8%) |
+| electro-dash-tauri-v2 | electro-dash | 0 | 17,099,592 B (17.10 MB) | 12,898,032 B (−24.6%) |
+| simplenote-tauri-v2 | Simplenote | 5 | 21,602,416 B (21.60 MB) | 14,467,136 B (−33.0%) |
+
+Plugin cost (measured): built-output (zero plugins) is the baseline at 11,419,952 B.
+Minimal adds 2 plugins and is 1,405,912 B larger (0.67 MiB/plugin — dialog and store
+are light). Full-apis carries 7 plugins and is 15,340,080 B larger (2.19
+MiB/plugin). Simplenote corroborates: 5 plugins, +10,182,464 B (1.94 MiB/plugin).
+The model scales with plugin count at ~2 MB per plugin (range 0.5–2.5, covering
+light plugin sets at the low end); the per-plugin breakdown is an open unknown —
+the updater's HTTP/TLS stack is certainly heavier than the opener's.
+
+Strip consistently saves roughly a third. The stripped zero-plugin figure
+(6.89 MiB) is consistent with wolinski's 7.3 MiB LTO macOS bundle. The full docs
+size profile (`lto`, `opt-level="s"`, `panic="abort"`, `codegen-units=1`) was NOT
+built: each release build takes 7–19 min on this VM, and the profile effect is
+bounded by the strip test plus the published LTO numbers below.
+
+### 11.2 Measured by us: Electron runtime baseline
+
+Method: `npm install electron@latest` in a scratch dir, then ran the package's own
+`install.js`. Measured 2026-11-25.
+
+| Quantity | Value |
+| --- | --- |
+| Electron version installed | **45.5.0** (npm `latest` on 2026-11-25; released 2026-11-24) |
+| Unpacked Linux x64 distribution (`node_modules/electron/dist`) | **286,956,316 bytes = 273.7 MiB** |
+| `electron` binary alone | **234,638,664 bytes = 223.8 MiB** (81.8% of the distribution) |
+| Compressed distribution (GitHub release asset `electron-v45.5.0-linux-x64.zip`) | **123,890,853 bytes = 118.2 MiB** |
+| Same, macOS x64 zip | 125,153,068 B = 119.4 MiB |
+| Same, Windows x64 zip | 158,528,093 B = 151.2 MiB |
+
+The runtime a migration removes is ~274 MiB unpacked (~118 MiB compressed) on Linux
+x64 for Electron 45.5.0 — before a single byte of app code. Cross-check: Dawloom's
+packaged Electron 44.4 app was 367.40 MB on disk with a 234.6 MB main executable —
+consistent with our 223.8 MiB binary.
+
+### 11.3 The electro-dash anomaly (OPEN)
+
+electro-dash-v2 (zero plugins, 17,099,592 B) is 5,679,640 B larger than
+built-output (zero plugins, 11,419,952 B) although the two projects have IDENTICAL
+dependency sets and versions (433 crates, 0 version diffs in the lockfiles),
+identical features, near-identical source, identical capabilities and bundle
+config, and were built with the same rustc 1.100.0 in the same session. Section
+analysis: `.text` is nearly identical (4,954,944 vs 4,963,888 B); the ENTIRE gap
+is unnamed `.rodata` (+5,694,400 B in electro-dash), with identical named rodata
+symbols and identical ~320 KB totals of named rodata symbols in both. The extra
+data is low-entropy structured data, not a compressed asset, image, or the
+frontend (`frontendDist` is a 623-byte `index.html` in both).
+
+**Rebuild attempt (2026-11-25):** the v2 project's `target/` directory was moved
+aside and the project rebuilt from clean (`cargo build --release`, 7m 31s, same
+sysroot). Result: the rebuilt binary is **byte-identical** to the original
+(17,099,592 bytes, md5 `979b498585c1bed8cb93d208df608246` for both). The
+stale-artifact hypothesis is dead — the gap reproduces from a clean build and is
+a property of the project, not its `target/` directory. The remaining candidate
+is a tauri-build codegen difference driven by `tauri.conf.json` values; bisecting
+that config is the next step, not yet attempted.
+
+Implication for the model: binary-size predictions carry an unexplained ±~6 MB
+variance between near-identical projects; the size confidence interval absorbs it
+(the 0-plugin range is 11.0–17.4 MB, point 11.4 MB). This section stays OPEN until
+the cause is found.
+
+### 11.4 Cited benchmarks
+
+- **Wolinski**, "Tauri vs Electron: Memory, IPC and MCP, Measured" —
+  https://wolinski.com/blog/tauri-vs-electron-ipc-memory.html (Nov 2026). Tauri
+  2.12.5 vs Electron 45.2.3, same HTML page, MacBook Pro M1 Pro 32 GB, macOS 27.2.
+  Memory = macOS footprint, median of 10 launches; startup = median of 30
+  launches. Bundle 7.3 MiB vs 268.7 MiB; idle 59.5 vs 86.0 MiB; startup a tie
+  (309/377 ms vs 321/326 ms). Companion repo with harness + run files. Weakness:
+  one machine, empty page, macOS only.
+- **Dawloom**, "Tauri vs Electron vs WPF benchmark" —
+  https://dawloom.com/blog/tauri-vs-electron-vs-wpf-benchmark/ (measured
+  2026-10-13/14, published 2026-10-19). Tauri 2.12.3 (size-optimised profile) vs
+  Electron 44.4.5, same counter app, Windows 11. Installer 1.05 MB vs 106.1 MB
+  NSIS; on disk 3.00 vs 367.40 MB; idle private memory 142 vs 149 MB (Tauri
+  median of 5, Electron N=1); processes 7 vs 4. Weakness: Electron memory is a
+  single run; Windows only; empty app.
+- **Skathi**, "Skathi vs Electron vs Tauri" — https://skathi.land/comparison/
+  (measured 2026-11-22). Same Vue app (1,000 list rows), Windows 11, Ryzen 9
+  9950X. Electron 45.3.3 vs Tauri 2.12.6. Median of 5. Tauri app 4.1 MiB; first
+  frame 522 vs 388 ms (Electron faster); private working set idle 95.2 vs 88.8
+  MiB (Tauri higher); processes 7 vs 4; idle CPU 0.62% vs 0.16% of one core
+  (noise-level; one tick ≈ 0.16 pp). Weakness: published by a competing framework;
+  the Electron/Tauri columns are a control arm.
+- **Lleg**, "Swapping Electron for Tauri Saved No Memory" —
+  https://lleg.dev/posts/electron-vs-tauri-empty-window-memory/ (Nov 2026).
+  Electron 45.2.3 vs Tauri 2.12.5, same static page (500 rows), Windows 11,
+  median of 5 runs. Private working set 103.3 vs 108 MB (Tauri +4.5%); Tauri exe
+  5.5 MiB; electron.exe 238.3 MiB. Weakness: one machine, empty page, Windows only.
+- **Hopp**, "Tauri vs. Electron: performance, bundle size, and the real trade-offs"
+  — https://dev.to/gethopp/tauri-vs-electron-performance-bundle-size-and-the-real-trade-offs-1el4
+  (April 2025). Same demo app, 6 windows open, MacBook Pro. Bundle 8.6 MiB vs
+  244 MiB; memory 172 vs 409 MB. N=1, Tauri 1.x-era scaffolding.
+- **WatchMe migration** —
+  https://dev.to/hamdi_laadhari/from-289-mb-to-15-mb-what-migrating-from-electron-to-tauri-actually-cost-n46
+  (Sept 2026). Real macOS menu-bar app, Electron → Tauri 2: `.app` 289 MB →
+  15 MB, `.dmg` 3.7 MB. No memory/startup numbers.
+- **Senific** (secondary) — https://senific.com/guides/tauri-vs-electron/ — compiles
+  the Elanis empty-app benchmark (macOS 364 → 96 MB memory) and the Better Stack
+  screen recorder (macOS, 128 → 109 MB idle, 273 → 311 ms startup). Secondhand;
+  used only as corroboration.
+
+**Official vendor claim (verified wording):** Tauri's official docs ("What is
+Tauri?", v2.tauri.app, accessed 2026-11-25) say only: *"a minimal Tauri app can be
+less than 600KB in size."* The docs' App Size concept page recommends a
+size-optimised release profile but gives **no numeric claim for typical apps, and
+no claim at all about memory or startup**. The often-quoted "3–15 MB" range does
+NOT appear in the official docs — it comes from third-party articles. The 600 KB
+figure is a floor for a minimal app under the optimised profile, not a prediction
+for a migrated app.
+
+### 11.5 What the model refuses (unknowns)
+
+1. Linux (WebKitGTK) idle memory and startup — zero published measurements.
+2. Loaded/active memory for a real app (not an empty window) on any platform.
+3. Multi-window memory and process-count scaling for Tauri (Electron's per-window
+   renderer is documented; Tauri's scaling is unmeasured).
+4. CPU under load on any platform; idle-CPU delta (noise-level for both).
+5. Startup improvement of any kind; cold-start on slow disks/HDDs.
+6. macOS `.app`/`.dmg` and Linux `.deb`/`.rpm`/AppImage sizes for e2r-generated
+   projects (our builds are Linux binaries only).
+7. Per-plugin binary-size cost isolated per plugin (the average ~2 MiB/plugin is
+   measured, but individual plugins differ).
+8. Effect of the docs' size-optimised release profile on e2r outputs (bounded by
+   the strip test, but the full LTO/`opt-level="s"`/`panic="abort"` combination was
+   not built).
+9. First-install size on Windows machines without the WebView2 runtime (~280 MB
+   standalone installer — a one-off, shared across apps, not per-app).
+10. Update/delta sizes; IPC-throughput for a migrated app's actual workload.
+11. Any per-app prediction: all cited numbers are empty-window or single-app
+    measurements. The honest framing is "framework-level ranges, measure your own
+    app".
+
+### 11.6 Figures that must NEVER be used
+
+- **The planning chat's illustrative sample figures** (readiness 86/100; 82%/18%/94%;
+  startup 2.1s→1.7s; memory 380→265 MB; CPU 22%→9%; binary 120→28 MB) — invented
+  examples from a ChatGPT planning thread, not data. They appear in the repo only
+  inside explicitly-labeled "NOT measurements" boxes.
+- **The Discord "Phoenix" ~290 MB RAM figure** — a single Task Manager screenshot of
+  an early build (Nov 2026), not a benchmark, and GPUI not Tauri. Never comparison
+  data.
+- **The "10× less memory" trope** — contradicted by every rigorous measurement in §11.4.
+- **The "600 KB" Tauri figure as a typical outcome** — the docs' floor for a minimal
+  app under the optimised profile.
+- **The offline-pixel.github.io "Electron to Tauri Migration" case study** (120 MB →
+  12 MB, 250 MB → 35 MB, 8 s → 1.2 s) — an unnamed company, no repo, no method;
+  excluded as unverifiable.
+
+### 11.7 Calibration approach
+
+The model improves by learning from discrepancies — deterministically, with no ML
+and no network. The loop (`e2r simulate --record` → migrate → measure →
+`e2r calibrate` → the log adjusts future intervals) is specified in
+[IMPLEMENTATION.md](IMPLEMENTATION.md) §5.4. The adjustment rule:
+
+- Each metric needs ≥3 logged comparisons before its interval moves.
+- Fewer than half of the actuals inside their predicted intervals → the model is
+  overconfident: widen 1.5×.
+- All actuals inside → the model is conservative: narrow 0.8×, floored at ±10% of
+  the point.
+- Otherwise no change. The point never moves — calibration adjusts confidence, not
+  the central estimate.
+
+The log is local (`~/.cache/e2r/calibration.jsonl`, overridable), append-only
+JSONL, and a missing or corrupt log behaves exactly like no calibration. The
+calibration data the model most needs: real migrated apps' bundle sizes (to
+narrow the ±6 MB anomaly absorption), per-plugin costs, and any Linux memory
+measurement at all.
