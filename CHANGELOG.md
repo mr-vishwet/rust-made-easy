@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Corrected
+
+- Proof-campaign v3 accuracy re-check (2026-11-27, [docs/PROOF.md](docs/PROOF.md) §4, full report [docs/ACCURACY-V3.md](docs/ACCURACY-V3.md)): hand-verified sampled accuracy is 79/101 = 78.2% (v2: 85/101 = 84.2%). The v3 scores recompute exactly, but three numbers in the campaign report were wrong as measurements: VS Code has 2 native modules, not 3 (`keytar` is a `file:` mock stub — "OVERRIDE Keytar since we don't need the feature" — with zero import/call sites), so its honest score is ≈32, not 19; Mailspring's score is ~28–29 de-duplicated, not 23 (71 `remote` roll-up groups overlap the 112 remote-mediated findings); Insomnia's IPC inventory is ~285 real channels, not 268 (17 registrations missed, including all three `once` sites), so its honest score is 48, not 46. The 60.0% UI carry-over is the scanner's floor, not a per-app measurement. Fix round 2's N1–N11: N1–N4, N7, N9, N11 closed; N5, N6, N8 only partly held; N10 unverifiable for Joplin.
+
 ### Added
 
 - `e2r serve` — the MCP server: the Migration Brain over the Model Context Protocol (stdio, rmcp 3.11.0), exposing six tools to AI coding agents — `analyse_electron_app`, `get_migration_plan`, `get_rust_replacement`, `simulate_migration`, `validate_migration`, `get_decision_log`. Every tool returns structured JSON; failures are structured errors (`INVALID_ARGUMENT`, `NOT_FOUND`, `API_NOT_FOUND`, `NOT_E2R_PROJECT`, `SCAN_FAILED`, `SIMULATION_FAILED`, `IO_ERROR`), never crashes. Conversion stays a CLI step — there is no `convert` tool — and `validate_migration` is a static check that never runs `cargo check`. Full reference: [docs/MCP.md](docs/MCP.md).

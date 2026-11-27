@@ -198,15 +198,15 @@ generated project. Full report, matrices, and honest limits: [docs/PROOF.md](doc
 
 | App | License | Scan (v3) | Convert + `cargo check` | Measured binary vs Electron installer |
 |---|---|---|---|---|
-| VS Code | MIT | 19/100 | ✅ PASS (408 s check, 1,487 s build) | 26.41 MB vs 280.1 MiB (~11×) |
+| VS Code | MIT | 19/100 (honest ≈32) | ✅ PASS (408 s check, 1,487 s build) | 26.41 MB vs 280.1 MiB (~11×) |
 | Signal Desktop | AGPL-3.0 | 42/100 | ✅ PASS (278 s check, 1,026 s build) | 27.26 MB vs 117.3 MiB (~4.5×) |
 | Joplin | AGPL-3.0-or-later | 23/100 | ✅ PASS (448 s check, 1,331 s build) | 23.58 MB vs 160.9 MiB (~7×) |
-| Mailspring | GPL-3.0 | 23/100 | ✅ PASS (282 s check, 761 s build) | 22.42 MB vs 138.9 MiB (~6.5×) |
-| Insomnia | Apache-2.0 | 46/100 | ✅ PASS (254 s check, 754 s build) | 23.82 MB vs 463.6 MiB (~20×) |
+| Mailspring | GPL-3.0 | 23/100 (honest ~28–29) | ✅ PASS (282 s check, 761 s build) | 22.42 MB vs 138.9 MiB (~6.5×) |
+| Insomnia | Apache-2.0 | 46/100 (honest 48) | ✅ PASS (254 s check, 754 s build) | 23.82 MB vs 463.6 MiB (~20×) |
 
 - **5/5 convert, 5/5 `cargo check`, 5/5 release build** — no hand-fixes to generated code.
 - **5/5 measured binaries inside their predicted binary intervals** — after the campaign caught and corrected its own calibration mistake (the first round compared binary-alone measurements against bundle intervals, 0/5 inside; the fix compares like with like — see [docs/PROOF.md](docs/PROOF.md#6-the-calibration-story--read-this-before-quoting-any-calibration-number)).
-- **Scan accuracy, hand-verified: 85/101 = 84.2%** (v1: 102/134 = 76.1%). v3 accuracy was not hand-verified.
+- **Scan accuracy, hand-verified: v3 79/101 = 78.2%** (v2: 85/101 = 84.2%; v1: 102/134 = 76.1%). Honest scores after the re-check: VS Code ≈32 (not 19 — `keytar` is a mock, not a native), Mailspring ~28–29 (not 23 — remote double-counting), Insomnia 48 (not 46 — one false positive) — full report: [docs/ACCURACY-V3.md](docs/ACCURACY-V3.md).
 - **Binary-vs-installer is not bundle-vs-bundle.** Every generated project ships a placeholder frontend, so no shipped-bundle figure exists yet — and no runtime metric (memory, startup) was measured. `cargo check` passing means the generated project compiles, not that the app works.
 
 ## The Migration Brain

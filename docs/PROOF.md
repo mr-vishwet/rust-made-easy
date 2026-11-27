@@ -1,6 +1,6 @@
 # Proof — 5 real Electron apps, converted to Rust
 
-Date: 2026-11-25. Tool: `e2r` 0.1.0 (`electron-to-rust`, this repo).
+Date: 2026-11-25. Corrected 2026-11-27 (v3 accuracy re-check, §4). Tool: `e2r` 0.1.0 (`electron-to-rust`, this repo).
 Status: campaign complete. Nothing in this document is a plan or a projection
 unless it is labelled **prediction** or **model estimate**.
 
@@ -18,7 +18,7 @@ daily-use Electron apps with documented high-RAM complaints were scanned,
 simulated, converted to Tauri 2 projects, and those generated projects were
 compiled and release-built. Every number below is either a measurement (method
 stated) or a labelled prediction. Where the campaign got something wrong, it
-says so — most prominently in §6, the calibration story.
+says so — most prominently in §6, the calibration story, and in §4, the v3 accuracy corrections.
 
 **Headline results**
 
@@ -31,8 +31,8 @@ says so — most prominently in §6, the calibration story.
 | Measured Electron installers they replace (Linux .deb) | **117.3–463.6 MiB** |
 | Binary vs installer (binary-vs-installer, NOT like-for-like — see §5) | **~4.5×–~20× smaller** |
 | Measured binaries inside their predicted binary interval | **5 / 5** (after the like-with-like fix, §6) |
-| Latest hand-verified scan accuracy (v2) | **85 / 101 = 84.2%** (v1: 102 / 134 = 76.1%) |
-| v3 feasibility scores (scanner output, NOT hand-verified) | 19 / 42 / 23 / 23 / 46 |
+| Latest hand-verified scan accuracy (v3) | **79 / 101 = 78.2%** (v2: 85 / 101 = 84.2%; v1: 102 / 134 = 76.1%) |
+| v3 feasibility scores (computed) | 19 / 42 / 23 / 23 / 46 — honest scores: VS Code ≈32, Signal 42, Joplin 23, Mailspring ~28–29, Insomnia 48 (see §4) |
 
 **What "cargo check passes" means, precisely:** the generated Tauri 2 project
 compiles. It does **not** mean the app works. No generated app was launched —
@@ -66,7 +66,9 @@ that treats a green build as a working app is wrong.
   clean.
 - Repo tree at campaign time: main at pushed commit **959f3a10** plus
   uncommitted fix rounds 1 + 2 (the tree is not a git repo, so the
-  uncommitted diff could not be recorded as a SHA).
+  uncommitted diff could not be recorded as a SHA). The campaign was pushed
+  as commit **05f941f4** on 2026-11-26; the v3 accuracy corrections in §4
+  were pushed after that (see [docs/ACCURACY-V3.md](ACCURACY-V3.md)).
 
 ### Exact commands
 
@@ -102,7 +104,9 @@ e2r calibrate <slug> --actual <slug>-measurements.json --record <slug>/predictio
 
 Per-app artefacts live in `~/workspace/rust-rnd/proof/<slug>/` (outside this
 repo): `scan.txt`, `scan.json`, `simulate.txt`, `simulate.json`,
-`predictions.json`, `META.md`, `ACCURACY.md`, `ACCURACY-V2.md`,
+`predictions.json`, `META.md`, `ACCURACY.md`, `ACCURACY-V2.md`, `ACCURACY-V3.md` (and the
+combined `proof/ACCURACY-V3.md`, copied into this repo as
+`docs/ACCURACY-V3.md`),
 `CONVERT.md`, plus `v1/` and `v2/` directories preserving the earlier runs'
 outputs (Mailspring has no `v1/` — its v1 files were overwritten by an early
 smoke re-scan; its v1 numbers survive in its `META.md` and in the campaign
@@ -188,11 +192,11 @@ is a summary; the counts are the signal.
 
 | App | v1 | v2 | v3 | What changed |
 |---|---|---|---|---|
-| VS Code | 30 | 15 | **19** | v2: keytar found (−15). v3: third native (@parcel/watcher) under the new formula |
+| VS Code | 30 | 15 | **19** (honest ≈32) | v2: keytar found (−15). v3: third native (@parcel/watcher) under the new formula — but keytar is a mock stub, not a native (§4); correcting only that error gives 29, correcting the audited false occurrences gives ≈32 |
 | Signal | 45 | 30 | **42** | v2: sqlcipher found (−15). v3: test windows gone, formula un-saturates |
 | Joplin | 45 | 0 | **23** | v2's 0 was a formula artifact (5 natives = −75, then both caps). v3 formula caps the native charge at −30 |
-| Mailspring | 30 | 15 | **23** | v2: node-llama-cpp found (−15). v3: remote-mediated MANUALs now split out |
-| Insomnia | 45 | 45 | **46** | v2: libcurl still missed (score too lenient by ≥15). v3: libcurl found, MANUAL groups 11 → 14 |
+| Mailspring | 30 | 15 | **23** (honest ~28–29) | v2: node-llama-cpp found (−15). v3: remote-mediated MANUALs now split out; de-duplicated (remote roll-up groups overlap the remote-mediated findings) the score is ~28–29 (§4) |
+| Insomnia | 45 | 45 | **46** (honest 48) | v2: libcurl still missed (score too lenient by ≥15). v3: libcurl found, MANUAL groups 11 → 14; IPC is ~285 real, not 268, and without the one false positive the score is 48 (§4) |
 | GitHub Desktop (alternate) | 35 | 0 | — (not re-scanned) | v2's 0 is the same formula artifact as Joplin's |
 
 **Score formula v3** (`scan.rs`, `docs/RND.md` §Feasibility score v3):
@@ -204,7 +208,13 @@ saturated: every app hit both caps, so the v2 score degenerated to
 `45 − 15×natives` and stopped discriminating. The v3 formula discriminates
 (19 / 42 / 23 / 23 / 46); Joplin and Mailspring share 23 by coincidence of
 different terms, not by cap. Every v3 score recomputes exactly from its own
-`scan.json`.
+`scan.json`. The formula is implemented correctly — every v3 score
+recomputes exactly, hand-verified in §4 — but the *inputs* are not all
+honest: VS Code's 19 charges −10 for a mock native and inflates the
+Manual-share term with a false-occurrence flood (honest ≈32); Mailspring's
+23 double-counts remote-mediated calls (honest ~28–29); Insomnia's 46 is 2
+points too harsh (honest 48). Signal (42) and Joplin (23) are the most
+honest as reported.
 
 ### 3.2 API sites (v3 counts) — Before (v1) → After (v3)
 
@@ -229,19 +239,34 @@ v2 were `@electron/remote`-reached calls, including APIs whose mapping note
 says "Direct equivalent" (`app.quit`, `clipboard`, `dialog`, `shell`).
 The v3 scanner flags these separately (`remote_mediated: true`; 112 groups
 for Mailspring), so "no Tauri equivalent" can now be split from "reached
-through remote" — the count did not fall, it became honest.
+through remote" — the count did not fall, it became honest. Hand-verification
+qualifies that: 7 ASSISTED groups escape the flag (the detector only fires
+on a single-line `require('@electron/remote').<Api>` pattern), so MANUAL is
+really 212 / ASSISTED 34, and one flag is outright wrong
+(`getCurrentWindow` at `app-env.ts:492` is MANUAL with
+`remote_mediated: false` although the next line is literally
+`return require('@electron/remote').getCurrentWindow();`) (§4).
 
 Other v3 scan facts: files scanned 10,926 / 2,633 / 2,386 / 885 / 1,367
 (v1: 16,131 / 3,261 / 3,843 / 1,224 / 1,951 — the drop is test/spec/fixture
 exclusion, not smaller apps). Windows found 4 / 9 / 2 / 8 / 5 (all real
 main windows found; Signal's 11 test windows and VS Code's fixture window
-are gone in v3). IPC channels 78 / 73 / 30 / 114 / **268** (Insomnia's
+are gone in v3). Signal's window *sizes* are mostly wrong, though: only 1
+of 9 is fully correct — five report height 44, but `height: 44` occurs
+exactly once in `app/main.main.ts` (the scanner leaks one window's height
+into every `const options` window) (§4). IPC channels 78 / 73 / 30 / 114 / **268** (Insomnia's
 72 → 268 is the `ipcMainHandle`/`ipcMainOn`/`ipcMainOnce` wrappers finally
-being counted). UI carry-over 60.0% for all five — the touch-point floor —
-measured on the real renderers in v3 (291 / 69 / 238 touch points for
-Signal / Joplin / Insomnia; the v2 figures of 79% / 67% / 94% were measured
-on the wrong renderer files with 2–11 touch points each, so the drop is
-the measurement getting honest, not the UI getting worse). Effort hints:
+being counted; hand-verification finds ~285 real — 17 registrations missed,
+including all three `once` sites, §4). UI carry-over 60.0% for all five — the scanner's floor, not a
+measurement: all five report exactly 60.0%, so it carries no per-app
+information (§4). The v2 figures of 79% / 67% / 94% were measured on the
+wrong renderer files with 2–11 touch points each, so the drop is the
+measurement getting honest, not the UI getting worse. Touch-point caveats:
+Insomnia's 238 counts 157 in `src/main/`, 26 in `src/sync/`, 8 in test
+mocks, and only 7 in true renderer files; VS Code's `src/` pick still
+includes 10.7% `electron-main`/bootstrap/test files, and bundler "vite"
+is a substring artifact (no vite dep or config; the real build is
+gulp+rspack). Effort hints:
 VS Code **large**, Joplin **large**, Mailspring **large**, Signal medium,
 Insomnia medium. Warnings: 33 / 19 / 18 / 50 / 12.
 
@@ -259,8 +284,8 @@ the app does not use it.
 | Updater | Before: custom service (macOS `autoUpdater` only) → After: **Manual** (custom service has no plugin equivalent) | Before: yes → After: **Partial** (updater plugin) | Before: yes (`electron-updater`) → After: **Partial** (updater plugin) | Before: yes → After: **Partial** — v3 newly finds Electron's built-in `autoUpdater` (14 sites) → 7th plugin; the Linux `autoUpdater` binding itself was lost from the v2 scan by the identifier gate (see §4) | Before: yes, DUAL (`autoUpdater` + `electron-updater`) → After: **Partial** — v3 correctly splits the two (Electron's at `updates.ts:81`, the library at `:95`) |
 | Notifications | Before: yes → After: **Supported** (notification plugin) | Before: yes → After: **Supported** | Before: no (in-app alarms) → After: **N/A** | Before: yes → After: **Supported** | Before: no (in-app toasts) → After: **N/A** |
 | Deep links | Before: yes ×5 (`vscode://`) → After: **Supported** (deep-link plugin) | Before: yes → After: **Supported** | Before: yes ×2 → After: **Supported** | Before: yes ×3 → After: **Supported** | Before: yes ×1 (`insomnia://`) → After: **Supported** |
-| Native modules | Before: `node-pty`, `keytar`, `@parcel/watcher` → After: **Manual** — no Tauri equivalent; flagged in convert warnings | Before: `@signalapp/sqlcipher` → After: **Manual** | Before: `keytar`, `onnxruntime-node`, `sharp`, `sqlite-vec`, `sqlite3` → After: **Manual** | Before: `better-sqlite3`, `node-llama-cpp` → After: **Manual** — plus spawned native binaries (`mailsync`, `mailspring-fm`) the scanner cannot see at all (§8) | Before: `@getinsomnia/node-libcurl` → After: **Manual** — found only in v3; the v2 scan and convert were both blind to it |
-| Preload | Before: 3 real files, contextBridge → After: **Partial** — typed bridge wrappers derived from the preload shape | Before: 26 entry files + 466 modules → After: **Partial** — bridge re-implements 11 `window.*` keys (v2 listed 603 files; only 14 were entry points) | Before: 2 files; main window has **none** (nodeIntegration + remote instead) → After: **Manual** for the main window | Before: 2 files + 1 module → After: **Partial** | Before: 3 files + 1 module → After: **Partial** |
+| Native modules | Before: `node-pty`, `@parcel/watcher` (`keytar` is a mock stub, not a native — §4) → After: **Manual** — no Tauri equivalent; flagged in convert warnings | Before: `@signalapp/sqlcipher` → After: **Manual** | Before: `keytar`, `onnxruntime-node`, `sqlite-vec`, `sqlite3` (`sharp` is union-only, never passed on desktop — §4) → After: **Manual** | Before: `better-sqlite3`, `node-llama-cpp` → After: **Manual** — plus spawned native binaries (`mailsync`, `mailspring-fm`) the scanner cannot see at all (§8) | Before: `@getinsomnia/node-libcurl` → After: **Manual** — found only in v3; the v2 scan and convert were both blind to it |
+| Preload | Before: 3 real files, contextBridge → After: **Partial** — typed bridge wrappers derived from the preload shape | Before: 26 entry files + 466 modules → After: **Partial** — bridge re-implements 11 `window.*` keys (v2 listed 603 files; only 14 were entry points) | Before: 2 files; main window has **none** (nodeIntegration + remote instead) → After: **Manual** for the main window | Before: 2 files + 1 module → After: **Partial** | Before: 3 files (the "+1 module" is `entry.preload.ts` double-counted — §4) → After: **Partial** |
 | nodeIntegration (production) | Before: no (fixture only) → After: **N/A** (production is sandboxed) | Before: no (sandboxed) → After: **N/A** | Before: **YES** (main window + plugins) → After: **Manual** (security redesign, not a mechanical port) | Before: **YES** (main window) → After: **Manual** | Before: **YES** (plugin + hidden windows; main window secure) → After: **Manual** for those windows |
 
 ### 3.4 Convert result — Before (Electron app) → After (generated Tauri project)
@@ -315,15 +340,15 @@ suggested Tauri replacement are right AND the reported line is a genuine call
 site. Samples are small (18–33 findings per app); the combined figures are
 the honest headline, not a per-API census.
 
-| App | v1 accuracy | v2 accuracy | Change |
-|---|---|---|---|
-| VS Code | 15/20 = 75.0% | 13/20 = **65.0%** | **−10.0 pts** |
-| Signal | 19/21 = 90.5% | 19/21 = **90.5%** | unchanged |
-| Joplin | 17/21 = 81.0% | 19/21 = **90.5%** | +9.5 pts |
-| Mailspring | 19/33 = 57.6% | 18/21 = **85.7%** | +28.1 pts |
-| Insomnia | 17/18 = 94.4% | 16/18 = **88.9%** | −5.5 pts |
-| GitHub Desktop (alternate) | 15/21 = 71.4% | — (no v2 re-check) | — |
-| **Combined (final 5)** | **102/134 = 76.1%** | **85/101 = 84.2%** | **+8.1 pts** |
+| App | v1 accuracy | v2 accuracy | v3 accuracy | Change v2 → v3 |
+|---|---|---|---|---|
+| VS Code | 15/20 = 75.0% | 13/20 = 65.0% | 10/18 = **55.6%** | **−9.4 pts** |
+| Signal | 19/21 = 90.5% | 19/21 = 90.5% | 20/21 = **95.2%** | +4.7 pts |
+| Joplin | 17/21 = 81.0% | 19/21 = 90.5% | 16/21 = **76.2%** (81.0% with caveat) | −14.3 pts |
+| Mailspring | 19/33 = 57.6% | 18/21 = 85.7% | 16/23 = **69.6%** | −16.1 pts |
+| Insomnia | 17/18 = 94.4% | 16/18 = 88.9% | 17/18 = **94.4%** | +5.5 pts |
+| GitHub Desktop (alternate) | 15/21 = 71.4% | — (no v2 re-check) | — (not re-scanned) | — |
+| **Combined (final 5)** | **102/134 = 76.1%** | **85/101 = 84.2%** | **79/101 = 78.2%** | **−6.0 pts** |
 
 **What the v2 fixes fixed (hand-verified):** all five real main windows
 found; all five renderers found; real app menus found (4 of 5 — VS Code's
@@ -364,14 +389,47 @@ cannot follow:
   were closed in fix round 2 (v3 counts moved as predicted) — but see the
   warning below.
 
-**⚠️ DO NOT invent v3 accuracy. v3 was NOT hand-verified.** No
-`ACCURACY-V3.md` exists; nobody re-ran the sampled finding checks against
-the v3 scanner. The v2 verified numbers (84.2% combined) are the latest
-verified accuracy. The v3 scan numbers in §3 are scanner outputs, and the
-only v3 evidence is that every targeted count moved the way the fix
-predicted (preload 603 → 26+466, windows 20 → 9, IPC 72 → 268, dev URLs
-3 bogus → 0 bogus, renderer picks 3 wrong → 0 wrong). A v3 accuracy
-re-check is the open follow-up.
+### v3 accuracy re-check (2026-11-27)
+
+The v3 re-check is done: same stratified-sample method as v1/v2, all five
+apps, full evidence in [docs/ACCURACY-V3.md](ACCURACY-V3.md) (combined
+summary; per-app evidence in the campaign working directory). Combined
+**79/101 = 78.2%** (v2: 85/101 = 84.2%). Read that figure with care:
+Mailspring's ASSISTED slice was deliberately targeted at the fix surface,
+so it holds all 7 of that app's wrong ASSISTED findings — the full
+ASSISTED population there is 34/41 = 82.9% correct, and a v2-style random
+sample would have scored ~20–21/23, putting the combined figure at
+~82–83%. VS Code's drop is real (one new false group plus the untouched
+`session` flood); Signal and Insomnia improved; Joplin's drop is sampling
+(its sample caught two non-Electron false positives v2's sample missed,
+while the known-false mass actually shrank to 6 occ / 227, 2.6%).
+
+**Corrected numbers** (scanner claim → verified; methods in
+`docs/ACCURACY-V3.md` §2):
+
+| App | Claimed | Corrected |
+|---|---|---|
+| VS Code | 3 native modules (`@parcel/watcher`, `keytar`, `node-pty`) | **2** — `keytar` is a `file:./packageMocks/keytar` stub, three no-op `Promise.resolve()`s ("OVERRIDE Keytar since we don't need the feature"); zero import/call sites; real credential storage is Electron `safeStorage` |
+| VS Code | score 19 | **≈32 honest** (keytar fix alone → 29; correcting also the fully-audited false occurrences gives MANUAL groups 40, ASSISTED 60, MANUAL occ 101, total occ 620, share term 3 → ≈32) |
+| VS Code | MANUAL occ 237 (growth 205 → 237) | Growth is **one false group**: MANUAL `webview` `webviewPreloads.ts:187` ×32 — all TypeScript generics (`postNotebookMessage<webviewMessages.…>`); zero `<webview>` tags in the file or anywhere under `src/vs/workbench/contrib/notebook/` |
+| VS Code | `session` class (57 groups, 126 occ) | **7/57 groups, 23/126 occ real (82% false)** — essentially unchanged from v2 |
+| Signal | window sizes (9 windows) | **Only 1 of 9 fully correct** (300×280 loading window). Five report height 44, but `height: 44` occurs exactly once in `app/main.main.ts` — the scanner leaks one window's height into every `const options` window. Window *count* unaffected |
+| Joplin | 5 native modules | **4 live on desktop** — `sharp` is union-only (never passed on desktop; `sharpEnabled()` is false). Score unaffected (native charge caps at 30) |
+| Joplin | 7 menus | **6 logical menus** — two branches of one `updateMenu()` |
+| Mailspring | MANUAL 205 / ASSISTED 41 | **MANUAL 212 / ASSISTED 34** if the 7 under-classified ASSISTED groups escalate. Score unchanged (capped terms) |
+| Mailspring | score 23 | **~28–29 de-duplicated** — 71 `remote` roll-up groups (217 occ) overlap the 112 remote-mediated findings (196 occ) |
+| Mailspring | quickpreview window 320×320 known | **≈414×414** — real size is `320 * (11/8.5)`; const-resolution dropped the multiplier. REGRESSION vs v2 (which honestly reported unknown) |
+| Insomnia | IPC 268 channels | **~285 real** — 207/224 main-side registrations listed (17 missing = 92.4% coverage) |
+| Insomnia | score 46 | **48 without the one false positive** — the I-18 `session` prose group is the only score-moving error; 46 is 2 points too harsh |
+| Insomnia | preload "3 + 1 module" | **3 real files; the "+1 module" is `entry.preload.ts` double-counted** |
+
+**Fix round 2 (N1–N11), re-verified:** N1, N2, N3, N4, N7, N9, N11 **closed**;
+N5 **closed as implemented, wrong in substance for VS Code** (keytar);
+N6 **mostly closed** (IPC 72 → 268 real, but 17 registrations missing);
+N8 **partly held** ("CLOSED" overstates it — 7 ASSISTED groups escape the
+flag plus 1 flag error); N10 **closed in code, unverifiable for Joplin**
+(`scan.json` carries no warnings field). The **60.0% UI carry-over is the
+scanner's floor, not a measurement** — all five apps report exactly 60.0%.
 
 ## 5. Performance matrix — Before → After
 
@@ -534,14 +592,19 @@ document.
   limits: the generated project is named `copilot-chat` (fixed in the v3
   scanner, not re-converted); the whole `src/` tree is copied but there is
   no build script, so nothing can rebuild the frontend; accuracy fell in
-  v2 (75% → 65%).
+  v2 (75% → 65%) and again in v3 (55.6%): `keytar` is a mock, not a native
+  (honest score ≈32, not 19), a new false `webview` ×32 group (all
+  TypeScript generics, zero real tags) accounts for all of the MANUAL
+  occurrence growth, and the `session` flood is still 82% false.
 - **Signal — the accuracy proof.** Highest verified accuracy (90.5% in both
   v1 and v2) and the cleanest fix story: test windows 20 → 9, process
   point 23 → 12, preload 603 → 26 entry files + 466 modules. Hardest
   blocker: `@signalapp/sqlcipher` (native, MANUAL) plus `systemPreferences`
   / `desktopCapturer` with no Tauri equivalent. Honest limits: the
   generated project ships the sticker-creator mini-app as its renderer,
-  not Signal's UI.
+  not Signal's UI. v3 accuracy 95.2% (20/21) — the cleanest app — but
+  window sizes are mostly wrong (only the 300×280 loading window fully
+  correct; five report height 44 from a single leaked literal).
 - **Joplin — the monorepo proof.** The messiest input (whole-monorepo
   payload 262.919 MB, desktop + mobile + server + CLI) and the cleanest
   window inventory (2/2 real). Hardest blocker: five native modules plus
@@ -549,7 +612,9 @@ document.
   `nodeIntegration: true` on the main window. Honest limits: the payload
   is still the whole monorepo in the simulator, so its 277–298 MB bundle
   interval is inflated by code that would never ship; the generated
-  project ships the pdf-viewer sub-package as its renderer.
+  project ships the pdf-viewer sub-package as its renderer. v3 accuracy
+76.2% (16/21): `sharp` is union-only, so 4 natives live on desktop, not
+5; the 7 menus are 6 logical ones (two branches of one `updateMenu()`).
 - **Mailspring — the remote proof.** The heaviest manual load (206 convert
   warnings, 194 MANUAL, 450 MANUAL call sites — 60.2%) and the proof that
   "MANUAL" needs splitting: most of it is `@electron/remote` mediation,
@@ -558,7 +623,10 @@ document.
   cannot see. Honest limits: the v2 scan lost the `autoUpdater` finding
   entirely (identifier gate); the generated project is the only one whose
   copied renderer looks like the real app — and its frontend was still
-  never built.
+  never built. v3 accuracy 69.6% (16/23): the remote split is real but
+incomplete — 7 ASSISTED groups escape the flag, so MANUAL is really 212 /
+ASSISTED 34 and the de-duplicated score is ~28–29; the quickpreview
+window regressed to a wrong 320×320 (real ≈414×414).
 - **Insomnia — the turnaround proof.** The sharpest v2→v3 correction: IPC
   72 → 268 (wrappers counted), libcurl found, `<webview>` ×2 MANUAL,
   updater correctly split, one window now 1280×720 from constants, dev
@@ -567,7 +635,9 @@ document.
   functions, and the real renderer is a monorepo package, not the root.
   Honest limits: the generated project ships an examples directory as its
   renderer; and its 463.6 MiB installer is the finding that breaks the
-  simulator's generic before-range (§5.1).
+  simulator's generic before-range (§5.1). v3 accuracy 94.4% (17/18): IPC
+  is ~285 real (17 registrations missed, including all three `once`
+  sites); without the one false positive the score is 48, not 46.
 
 ## 8. Honest limits
 
@@ -609,10 +679,18 @@ document.
 8. **Joplin's payload is still the whole monorepo.** Its bundle interval
    (277–298 MB) is inflated by desktop + mobile + server + CLI code that
    would never ship in the desktop bundle.
-9. **v3 accuracy was not hand-verified** (§4). The latest verified
-   accuracy is v2's 85/101 = 84.2%. The v3 numbers are scanner outputs.
+9. **v3 accuracy is hand-verified** (79/101 = 78.2%, §4) — and it
+   corrects the record: VS Code's native count (3 → 2) and score (19 → ≈32
+   honest), Mailspring's score (23 → ~28–29 de-duplicated), Insomnia's IPC
+   inventory (268 → ~285 real) and score (46 → 48 without the one false
+   positive). The v3 scores as computed are right; the honest scores differ.
 10. **Samples are small.** Accuracy figures rest on 18–33 sampled findings
     per app. They are the honest headline, not a per-API census.
+11. **The 60.0% UI carry-over is the scanner's floor**, not a per-app
+    measurement (§4).
+12. **"N1–N11 all closed" overstates three items** (§4): N5 (keytar),
+    N6 (17 IPC registrations missed), N8 (7 groups escape the remote
+    flag); N10 is unverifiable for Joplin.
 
 ## 9. What this proves — and what it does not
 
@@ -624,10 +702,11 @@ document.
 - The generated release binaries are small and payload-independent
   (22–27 MB, 6–7 plugins, unstripped) and land inside the simulator's
   binary intervals 5/5, once like is compared with like.
-- The scanner's finding counts are substantially hand-verified (84.2%
-  combined at v2), and the fix rounds moved every targeted count the way
-  the fix predicted — including closing all eleven v2 scanner problems
-  (N1–N11) plus the calibrate-units and renderer-pick additions.
+- The scanner's finding counts are hand-verified at v3 (78.2% combined,
+  §4 — 79/101 sampled findings correct), and the fix rounds moved every
+  targeted count the way the fix predicted — N1–N4, N7, N9, N11 closed;
+  N5, N6, N8 only partly held; N10 unverifiable for Joplin — plus the
+  calibrate-units and renderer-pick additions.
 - The calibration loop now compares like with like, and the campaign
   caught and corrected its own wrong calibration entries in public.
 
@@ -639,9 +718,9 @@ document.
   prediction.
 - That the shipped bundle will be smaller than the Electron installer.
   The binary is smaller; the bundle is unmeasured.
-- That a migration is easy. The scores are 19–46/100 ("Manual effort
-  needed"), the MANUAL shares run 4–60% of call sites, and the effort
-  hints are "large" for three of the five apps.
+- That a migration is easy. The scores are 19–46/100 as computed
+  (honest: ≈32 / 42 / 23 / ~28–29 / 48), the MANUAL shares run 4–60% of
+  call sites, and the effort hints are "large" for three of the five apps.
 
 The campaign's claim is narrower and, for that reason, defensible: the
 mechanical part of the move — scan it, generate it, compile it — works on
